@@ -3,6 +3,10 @@ package com.verifour.app
 import com.verifour.app.data.DetectionVerdict
 import com.verifour.app.data.OpenAiPlasticDetector
 import com.verifour.app.i18n.FlysticTranslations
+import com.verifour.app.model.AccessLogEntry
+import com.verifour.app.model.AccessOutcome
+import com.verifour.app.model.AccountStatus
+import com.verifour.app.model.AdminInviteToken
 import com.verifour.app.model.AppLocale
 import com.verifour.app.model.ArenaTier
 import com.verifour.app.model.COLLECTION_POINTS
@@ -17,6 +21,7 @@ import com.verifour.app.model.EcoCampaign
 import com.verifour.app.model.FlysticState
 import com.verifour.app.model.GreenCityState
 import com.verifour.app.model.InvitedCityMascot
+import com.verifour.app.model.ManagedAccount
 import com.verifour.app.model.PLASTIC_MASCOTS
 import com.verifour.app.model.PetCompanionState
 import com.verifour.app.model.PetPersonality
@@ -34,10 +39,16 @@ import com.verifour.app.model.TxItem
 import com.verifour.app.model.User
 import com.verifour.app.model.UserPersonalizationState
 import com.verifour.app.model.calculatePoints
+import com.verifour.app.model.computeAccountSummary
+import com.verifour.app.model.computeTokenSummary
 import com.verifour.app.model.effectiveTransactionStatus
+import com.verifour.app.model.filterAccessLogs
+import com.verifour.app.model.filterManagedAccounts
 import com.verifour.app.model.getStationFillKg
 import com.verifour.app.model.getStationFillPercent
+import com.verifour.app.model.isInviteTokenActive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -389,8 +400,8 @@ class FlysticDomainTest {
               "status": "UNSUPPORTED",
               "plastic_code": "PVC_OR_OTHER",
               "confidence": 0.88,
-              "mascot_message": "Thẻ nhựa PVC #3 chưa thu gom tại trạm FLYSTIC.",
-              "prep_tip": "Không bỏ vào thùng tái chế FLYSTIC.",
+              "mascot_message": "Thẻ nhựa PVC #3 chưa thu gom tại trạm VeriFour.",
+              "prep_tip": "Không bỏ vào thùng tái chế VeriFour.",
               "angle_suggestions": [],
               "packaging_origin_questions": []
             }
@@ -423,6 +434,171 @@ class FlysticDomainTest {
             "aiDetectGuideBanner"
         )
         aiKeys.forEach { key ->
+            AppLocale.entries.forEach { locale ->
+                val translated = FlysticTranslations.t(key, locale)
+                assertTrue("Missing $key for $locale", translated.isNotBlank() && translated != key)
+            }
+        }
+    }
+
+    @Test
+    fun adminOps_filtersAndSummariesWorkCorrectly() {
+        val now = 10_000L
+        val accounts = listOf(
+            ManagedAccount(
+                id = "a1",
+                email = "admin.b1@hust.edu.vn",
+                name = "Quân Admin",
+                role = Role.ADMIN,
+                stationId = "soict-b1",
+                collectionPoint = COLLECTION_POINTS[0].canonicalName,
+                status = AccountStatus.ACTIVE
+            ),
+            ManagedAccount(
+                id = "s1",
+                email = "linh@sis.hust.edu.vn",
+                name = "Thảo Linh",
+                role = Role.STUDENT,
+                studentId = "20225101",
+                faculty = "SOICT",
+                status = AccountStatus.ACTIVE
+            ),
+            ManagedAccount(
+                id = "s2",
+                email = "an@sis.hust.edu.vn",
+                name = "Hoàng An",
+                role = Role.STUDENT,
+                studentId = "20231088",
+                faculty = "Mechanical",
+                status = AccountStatus.LOCKED
+            )
+        )
+
+        val accSummary = computeAccountSummary(accounts)
+        assertEquals(3, accSummary.total)
+        assertEquals(1, accSummary.admins)
+        assertEquals(2, accSummary.students)
+        assertEquals(2, accSummary.active)
+        assertEquals(1, accSummary.locked)
+
+        assertEquals(1, filterManagedAccounts(accounts, "20225101").size)
+        assertEquals(1, filterManagedAccounts(accounts, "", roleFilter = Role.ADMIN).size)
+        assertEquals(1, filterManagedAccounts(accounts, "", statusFilter = AccountStatus.LOCKED).size)
+
+        val txs = listOf(
+            Transaction(
+                id = "t1",
+                token = "TOK1",
+                userId = null,
+                userName = null,
+                adminId = "a1",
+                collectionPoint = COLLECTION_POINTS[0].canonicalName,
+                items = listOf(TxItem(PlasticType.PET, 1.0, Cleanliness.CLEAN, 15)),
+                totalQuantity = 1.0,
+                weightKg = 1.0,
+                points = 15,
+                status = TransactionStatus.PENDING,
+                createdAt = 1_000L,
+                expiresAt = 20_000L
+            ),
+            Transaction(
+                id = "t2",
+                token = "TOK2",
+                userId = null,
+                userName = null,
+                adminId = "a1",
+                collectionPoint = COLLECTION_POINTS[0].canonicalName,
+                items = listOf(TxItem(PlasticType.PP, 1.0, Cleanliness.NORMAL, 8)),
+                totalQuantity = 1.0,
+                weightKg = 1.0,
+                points = 8,
+                status = TransactionStatus.PENDING,
+                createdAt = 1_000L,
+                expiresAt = 5_000L
+            ),
+            Transaction(
+                id = "t3",
+                token = "TOK3",
+                userId = "s1",
+                userName = "Thảo Linh",
+                adminId = "a1",
+                collectionPoint = COLLECTION_POINTS[0].canonicalName,
+                items = listOf(TxItem(PlasticType.PET, 2.0, Cleanliness.CLEAN, 30)),
+                totalQuantity = 2.0,
+                weightKg = 2.0,
+                points = 30,
+                status = TransactionStatus.CONFIRMED,
+                createdAt = 1_000L,
+                confirmedAt = 2_000L,
+                expiresAt = 20_000L
+            )
+        )
+
+        val invites = listOf(
+            AdminInviteToken(
+                id = "i1",
+                code = "ADM-1",
+                label = "Active invite",
+                stationId = "soict-b1",
+                stationName = "B1",
+                maxUses = 5,
+                usedCount = 1,
+                expiresAt = 25_000L,
+                isRevoked = false
+            ),
+            AdminInviteToken(
+                id = "i2",
+                code = "ADM-2",
+                label = "Revoked invite",
+                stationId = "soict-b1",
+                stationName = "B1",
+                maxUses = 5,
+                usedCount = 1,
+                expiresAt = 25_000L,
+                isRevoked = true
+            )
+        )
+
+        assertTrue(isInviteTokenActive(invites[0], now))
+        assertFalse(isInviteTokenActive(invites[1], now))
+
+        val tokSummary = computeTokenSummary(txs, invites, now)
+        assertEquals(1, tokSummary.activeQr)
+        assertEquals(1, tokSummary.expiredQr)
+        assertEquals(1, tokSummary.confirmedQr)
+        assertEquals(1, tokSummary.activeInvites)
+
+        val logs = listOf(
+            AccessLogEntry(
+                id = "l1",
+                email = "admin.b1@hust.edu.vn",
+                eventType = "login_success",
+                outcome = AccessOutcome.SUCCESS,
+                ipAddress = "14.177.1.1"
+            ),
+            AccessLogEntry(
+                id = "l2",
+                email = "bot@evil.test",
+                eventType = "login_locked",
+                outcome = AccessOutcome.BLOCKED,
+                detail = "Brute force"
+            )
+        )
+        assertEquals(1, filterAccessLogs(logs, "bot", outcomeFilter = AccessOutcome.BLOCKED).size)
+        assertEquals(2, filterAccessLogs(logs, "").size)
+
+        val opsKeys = listOf(
+            "routeAdminOps",
+            "adminOpsTitle",
+            "adminOpsTabMonitor",
+            "adminOpsTabAccounts",
+            "adminOpsTabTokens",
+            "adminOpsTabAccess",
+            "adminOpsDashboardBannerTitle",
+            "adminOpsActionRevokeTokens",
+            "adminOpsLockoutsTitle"
+        )
+        opsKeys.forEach { key ->
             AppLocale.entries.forEach { locale ->
                 val translated = FlysticTranslations.t(key, locale)
                 assertTrue("Missing $key for $locale", translated.isNotBlank() && translated != key)

@@ -324,7 +324,7 @@ fun AdminNewTransactionScreen(
                                     .clickable {
                                         val clipboard = context.getSystemService(ClipboardManager::class.java)
                                         clipboard?.setPrimaryClip(
-                                            ClipData.newPlainText("FLYSTIC Token", active.token)
+                                            ClipData.newPlainText("VeriFour Token", active.token)
                                         )
                                         copied = true
                                     }

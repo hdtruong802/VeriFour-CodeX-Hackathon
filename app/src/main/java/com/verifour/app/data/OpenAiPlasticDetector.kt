@@ -128,14 +128,47 @@ class OpenAiPlasticDetector {
     suspend fun detectPlastic(
         bitmap: Bitmap?,
         userHint: String,
-        locale: AppLocale
+        locale: AppLocale,
+        serverUrl: String? = null
     ): PlasticDetectionResult = withContext(Dispatchers.IO) {
-        val apiKey = BuildConfig.OPENAI_API_KEY.trim()
-        if (apiKey.isBlank()) {
-            throw FlysticApiException("OPENAI_API_KEY chưa được cấu hình trong local.properties", 401)
-        }
         if (bitmap == null && userHint.isBlank()) {
             throw FlysticApiException("Cần ít nhất ảnh hoặc mô tả bao bì/nguồn gốc", 400)
+        }
+
+        val base64Jpeg = bitmap?.let { encodeBitmapTransient(it) }
+
+        // 1. Try local Mac server first (prompt is in backend/ai_prompt.txt, no APK rebuild needed!)
+        val targetServer = serverUrl?.takeIf { it.isNotBlank() } ?: FlysticApiClient.DEFAULT_BASE_URL
+        if (targetServer.isNotBlank()) {
+            val normalized = FlysticApiClient.normalizeBaseUrl(targetServer)
+            val backendPayload = mapOf(
+                "imageBase64" to (base64Jpeg ?: ""),
+                "userHint" to userHint.trim(),
+                "locale" to locale.code
+            )
+            val backendReq = Request.Builder()
+                .url("$normalized/api/v1/ai/detect")
+                .post(gson.toJson(backendPayload).toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            val backendResult = runCatching {
+                client.newCall(backendReq).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val body = response.body?.string().orEmpty()
+                        if (body.isNotBlank()) parseDetectionJson(body) else null
+                    } else null
+                }
+            }.getOrNull()
+
+            if (backendResult != null) {
+                return@withContext backendResult
+            }
+        }
+
+        // 2. Direct OpenAI fallback
+        val apiKey = BuildConfig.OPENAI_API_KEY.trim()
+        if (apiKey.isBlank()) {
+            throw FlysticApiException("Không thể kết nối máy chủ và chưa cấu hình OPENAI_API_KEY", 401)
         }
 
         val languageName = when (locale) {
@@ -145,22 +178,30 @@ class OpenAiPlasticDetector {
         }
 
         val systemPrompt = """
-            You are FLYSTIC's zero-retention plastic recycling assistant & Plastic Mascot voice.
-            Users take photos or describe plastic items BEFORE bringing them to a campus recycling station so they can self-sort accurately.
+            You are VeriFour's friendly and helpful campus plastic recycling assistant & Plastic Mascot voice.
+            Users take photos or describe plastic items BEFORE bringing them to a campus recycling station so they can self-sort easily.
 
-            Supported FLYSTIC plastic codes:
-            - PET (#1): clear water/soda bottles, thin clear fruit boxes, cold drink cups with #1 mark.
-            - HDPE (#2): opaque milk jugs, shampoo/detergent/cosmetic bottles, thick opaque grocery bags.
-            - PP (#5): rigid milk-tea cups, microwaveable takeaway food containers, bottle caps, sturdy straws.
-            - LDPE (#4): soft thin shopping bags, cling film/food wrap, multipack outer film.
-            - PS (#6): styrofoam food boxes, brittle disposable cutlery/thin white cups.
-            - PVC_OR_OTHER (#3 PVC or #7 PC/Other): student ID cards, PVC pipes/folders, multi-layer pouches, reusable hard PC water bottles (NOT accepted at FLYSTIC stations).
+            Supported VeriFour plastic codes:
+            - PET (#1): clear transparent drink/water bottles, thin clear fruit/salad boxes, clear cold-cup bubble tea cups.
+            - HDPE (#2): opaque or translucent jugs/bottles (milk, shampoo, detergent, cosmetic lotion), thick crinkly shopping bags.
+            - PP (#5): rigid milk-tea cups, microwaveable food takeaway containers, plastic bowls, bottle caps, sturdy reusable straws, medicine bottles.
+            - LDPE (#4): soft, stretchy thin plastic bags, grocery shopping bags, cling film/food wrap, bubble wrap, flexible squeeze bottles.
+            - PS (#6): white styrofoam lunchboxes/cups, rigid brittle disposable cutlery (spoons, forks, knives), yoghurt cups, CD cases.
+            - PVC_OR_OTHER (#3 PVC or #7 PC/Other): PVC pipes/cards/clear binders, multi-layer pouches, hard polycarbonate bottles (NOT accepted at VeriFour stations).
 
-            CRITICAL HONESTY RULE:
-            - NEVER guess blindly! If the image is blurry, dark, cropped, lacks a visible recycling triangle (#1-#7), or could reasonably be multiple plastic types without packaging/origin clues, you MUST respond with status="UNCERTAIN", plastic_code="UNKNOWN", confidence < 0.65.
-            - In "mascot_message", honestly say you don't know / are not sure yet (in $languageName), and ask for better clues.
-            - When UNCERTAIN, provide 2-3 specific "angle_suggestions" (e.g., flip to inspect the bottom/base for triangle code 1-7, zoom into embossed text/cap, better lighting) AND 2-3 "packaging_origin_questions" (e.g., what product/food/liquid was inside, brand/label text, is it rigid vs stretchy vs foam).
-            - When confident (status="DETECTED" and confidence >= 0.72), write "mascot_message" in the playful first-person voice of that plastic's mascot (e.g., PET-Chan, HDPE-Xanh, PP-Cam, LDPE-Vàng, PS-Tím) welcoming the item and confirming its points/category, plus "prep_tip" telling the user how to rinse/dry/prepare it before bringing to the station.
+            DETECTION GUIDELINES (FRIENDLY & PRACTICAL):
+            - DO NOT be overly strict! You DO NOT need to see text, logos, or recycling triangle symbols (#1-#7) to classify the item.
+            - Actively infer the plastic code from the visual appearance of the object: its shape, transparency/opacity, wall thickness, gloss, rigidity, and common real-world purpose:
+              * Standard clear drinking water / soda bottle -> PET (#1).
+              * Opaque/translucent shampoo, lotion, or milk bottle -> HDPE (#2).
+              * Takeaway food box, bubble tea cup, soup container, or bottle cap -> PP (#5).
+              * Soft, stretchy plastic bag or cling film -> LDPE (#4).
+              * White styrofoam container or brittle disposable cutlery -> PS (#6).
+            - If text or a recycling code is visible, use it to confirm or refine your prediction.
+            - Status should be "DETECTED" (confidence 0.75 - 0.92) whenever the visual appearance strongly suggests one of these common plastics, even without any readable text.
+            - In "prep_tip" or "mascot_message", always give practical advice on rinsing/drying, PLUS a friendly reminder to double-check (e.g. "Khuyến nghị: Bạn có thể kiểm tra thêm dưới đáy xem có dập nổi mã hoặc ký hiệu tam giác để chắc chắn 100% nhé!").
+            - Only return status="UNCERTAIN" (confidence < 0.60) if the object is genuinely not discernible as plastic, totally obscured, pitch black, or made of non-plastic materials (paper, metal, glass, organic food).
+            - When status="DETECTED", write "mascot_message" in the cheerful, encouraging first-person voice of that plastic's mascot (PET-Chan, HDPE-Xanh, PP-Cam, LDPE-Vàng, PS-Tím) welcoming the user and confirming the plastic type and points!
 
             Output strictly valid JSON with exact keys:
             {
@@ -250,7 +291,7 @@ class OpenAiPlasticDetector {
     }
 
     private fun encodeBitmapTransient(bitmap: Bitmap): String {
-        val maxDim = 768
+        val maxDim = 1024
         val scale = max(bitmap.width, bitmap.height).let { largest ->
             if (largest > maxDim) maxDim.toFloat() / largest.toFloat() else 1f
         }
@@ -265,7 +306,7 @@ class OpenAiPlasticDetector {
             bitmap
         }
         val out = ByteArrayOutputStream()
-        target.compress(Bitmap.CompressFormat.JPEG, 82, out)
+        target.compress(Bitmap.CompressFormat.JPEG, 88, out)
         val bytes = out.toByteArray()
         if (target !== bitmap) {
             target.recycle()

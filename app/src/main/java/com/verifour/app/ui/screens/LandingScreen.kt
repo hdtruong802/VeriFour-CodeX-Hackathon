@@ -2,6 +2,7 @@ package com.verifour.app.ui.screens
 
 import android.content.Intent
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -39,12 +40,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
+import com.verifour.app.R
 import com.verifour.app.i18n.FlysticTranslations
 import com.verifour.app.model.AppLocale
 import com.verifour.app.model.COLLECTION_POINTS
@@ -98,21 +102,23 @@ fun LandingScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
                                 modifier = Modifier
-                                    .size(38.dp)
+                                    .size(40.dp)
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(EcoPrimary),
+                                    .background(Color.White)
+                                    .border(1.dp, EcoBorder, RoundedCornerShape(12.dp))
+                                    .padding(3.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Recycling,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(22.dp)
+                                Image(
+                                    painter = painterResource(R.drawable.verifour_avatar),
+                                    contentDescription = "VeriFour",
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier.fillMaxSize()
                                 )
                             }
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                text = "FLYSTIC",
+                                text = "VeriFour",
                                 fontSize = 20.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = EcoForeground
@@ -576,7 +582,7 @@ fun LandingScreen(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
-                                text = "FLYSTIC",
+                                text = "VeriFour",
                                 fontSize = 20.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = EcoBackground

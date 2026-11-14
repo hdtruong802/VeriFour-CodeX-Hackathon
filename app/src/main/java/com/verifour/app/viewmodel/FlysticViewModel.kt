@@ -5,8 +5,11 @@ import android.graphics.Bitmap
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.verifour.app.data.FlysticApiClient
 import com.verifour.app.data.FlysticRepository
 import com.verifour.app.i18n.FlysticTranslations
+import com.verifour.app.model.AccountStatus
+import com.verifour.app.model.AdminOpsState
 import com.verifour.app.model.AppLocale
 import com.verifour.app.model.CampaignParticipant
 import com.verifour.app.model.CampaignPhoto
@@ -47,9 +50,12 @@ data class FlysticUiState(
     val state: FlysticState = FlysticState(),
     val isReady: Boolean = false,
     val isRemote: Boolean = true,
+    val serverUrl: String = FlysticApiClient.DEFAULT_BASE_URL,
     val petState: PetCompanionState = PetCompanionState(),
     val personalization: UserPersonalizationState = UserPersonalizationState(),
     val campaigns: List<EcoCampaign> = emptyList(),
+    val adminOps: AdminOpsState = AdminOpsState(),
+    val isAdminOpsLoading: Boolean = false,
     val petEvent: PetAnimationEvent = PetAnimationEvent.IDLE,
     val petEventTrigger: Int = 0,
     val petEventPointsDelta: Int = 0,
@@ -64,7 +70,8 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
         FlysticUiState(
             state = FlysticState(locale = repository.getPersistedLocale()),
             isReady = false,
-            isRemote = repository.isRemoteMode()
+            isRemote = repository.isRemoteMode(),
+            serverUrl = repository.getServerUrl()
         )
     )
     val uiState: StateFlow<FlysticUiState> = _uiState.asStateFlow()
@@ -75,6 +82,11 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
             val pet = initializePetForUser(loaded)
             val personalization = repository.loadPersonalization(loaded.user?.id)
             val campaigns = repository.loadCampaigns(loaded.user?.id)
+            val adminOps = if (loaded.user?.role == Role.ADMIN) {
+                runCatching { repository.loadAdminOpsState(loaded) }.getOrElse { AdminOpsState() }
+            } else {
+                AdminOpsState()
+            }
             _uiState.update {
                 it.copy(
                     state = loaded,
@@ -82,7 +94,8 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
                     isRemote = repository.isRemoteMode(),
                     petState = pet,
                     personalization = personalization,
-                    campaigns = campaigns
+                    campaigns = campaigns,
+                    adminOps = adminOps
                 )
             }
         }
@@ -110,6 +123,17 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
             if (!current.isRemote) repository.saveLocalState(updatedState)
             current.copy(state = updatedState)
         }
+    }
+
+    fun setServerUrl(url: String): String {
+        val normalized = repository.saveServerUrl(url)
+        _uiState.update { it.copy(serverUrl = normalized) }
+        return normalized
+    }
+
+    suspend fun testServerConnection(url: String): Result<String> {
+        val normalized = setServerUrl(url)
+        return repository.pingServer(normalized)
     }
 
     fun setRemoteMode(remote: Boolean) {
@@ -165,12 +189,18 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
         val pet = initializePetForUser(next)
         val personalization = repository.loadPersonalization(next.user?.id)
         val campaigns = repository.loadCampaigns(next.user?.id)
+        val adminOps = if (next.user?.role == Role.ADMIN) {
+            runCatching { repository.loadAdminOpsState(next) }.getOrElse { AdminOpsState() }
+        } else {
+            AdminOpsState()
+        }
         _uiState.update {
             it.copy(
                 state = next,
                 petState = pet,
                 personalization = personalization,
                 campaigns = campaigns,
+                adminOps = adminOps,
                 petReactionKey = null
             )
         }
@@ -185,6 +215,7 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
                 petState = PetCompanionState(),
                 personalization = UserPersonalizationState(),
                 campaigns = emptyList(),
+                adminOps = AdminOpsState(),
                 petEvent = PetAnimationEvent.IDLE,
                 petEventTrigger = 0,
                 petReactionKey = null
@@ -201,7 +232,137 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
                 val stations = repository.fetchStations()
                 _uiState.update { it.copy(state = it.state.copy(stations = stations)) }
             }
+            if (_uiState.value.state.user?.role == Role.ADMIN) {
+                refreshAdminOps()
+            }
         }
+    }
+
+    fun refreshAdminOps() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isAdminOpsLoading = true) }
+            val loaded = runCatching { repository.loadAdminOpsState(_uiState.value.state) }.getOrNull()
+            _uiState.update { current ->
+                current.copy(
+                    adminOps = loaded ?: current.adminOps,
+                    isAdminOpsLoading = false
+                )
+            }
+        }
+    }
+
+    suspend fun createManagedAccount(
+        name: String,
+        email: String,
+        password: String,
+        role: Role,
+        studentId: String?,
+        faculty: String?,
+        stationId: String?
+    ) {
+        val nextOps = repository.createManagedAccount(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps,
+            name = name,
+            email = email,
+            password = password,
+            role = role,
+            studentId = studentId,
+            faculty = faculty,
+            stationId = stationId
+        )
+        _uiState.update { it.copy(adminOps = nextOps) }
+    }
+
+    suspend fun updateAccountStatus(userId: String, status: AccountStatus) {
+        val nextOps = repository.updateManagedAccountStatus(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps,
+            userId = userId,
+            status = status
+        )
+        _uiState.update { it.copy(adminOps = nextOps) }
+    }
+
+    suspend fun updateAccountRole(userId: String, role: Role, stationId: String?) {
+        val nextOps = repository.updateManagedAccountRole(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps,
+            userId = userId,
+            role = role,
+            stationId = stationId
+        )
+        _uiState.update { it.copy(adminOps = nextOps) }
+    }
+
+    suspend fun revokeUserTokens(userId: String) {
+        val nextOps = repository.revokeManagedUserTokens(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps,
+            userId = userId
+        )
+        _uiState.update { it.copy(adminOps = nextOps) }
+    }
+
+    suspend fun revokeQrToken(txId: String) {
+        val (nextState, nextOps) = repository.revokeQrToken(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps,
+            txId = txId
+        )
+        _uiState.update { it.copy(state = nextState, adminOps = nextOps) }
+    }
+
+    suspend fun expireStaleQrTokens() {
+        val (nextState, nextOps) = repository.expireStaleQrTokens(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps
+        )
+        _uiState.update { it.copy(state = nextState, adminOps = nextOps) }
+    }
+
+    suspend fun createAdminInviteToken(
+        label: String,
+        stationId: String,
+        maxUses: Int,
+        ttlHours: Int
+    ) {
+        val nextOps = repository.createAdminInviteToken(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps,
+            label = label,
+            stationId = stationId,
+            maxUses = maxUses,
+            ttlHours = ttlHours
+        )
+        _uiState.update { it.copy(adminOps = nextOps) }
+    }
+
+    suspend fun revokeAdminInviteToken(inviteId: String) {
+        val nextOps = repository.revokeAdminInviteToken(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps,
+            inviteId = inviteId
+        )
+        _uiState.update { it.copy(adminOps = nextOps) }
+    }
+
+    suspend fun toggleStationOperational(stationId: String) {
+        val nextOps = repository.toggleStationOperational(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps,
+            stationId = stationId
+        )
+        _uiState.update { it.copy(adminOps = nextOps) }
+    }
+
+    suspend fun clearAuthLockout(throttleKey: String?) {
+        val nextOps = repository.clearAuthLockout(
+            currentState = _uiState.value.state,
+            currentOps = _uiState.value.adminOps,
+            throttleKey = throttleKey
+        )
+        _uiState.update { it.copy(adminOps = nextOps) }
     }
 
     suspend fun createTransaction(
@@ -214,6 +375,7 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
             collectionPoint = collectionPoint
         )
         _uiState.update { it.copy(state = next) }
+        refreshAdminOps()
         return created
     }
 
@@ -238,11 +400,13 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
     suspend fun cancelTransaction(id: String) {
         val next = repository.cancelTransaction(_uiState.value.state, id)
         _uiState.update { it.copy(state = next) }
+        refreshAdminOps()
     }
 
     suspend fun emptyCollectionPoint(collectionPoint: String): CollectionRun? {
         val (run, next) = repository.emptyCollectionPoint(_uiState.value.state, collectionPoint)
         _uiState.update { it.copy(state = next) }
+        refreshAdminOps()
         return run
     }
 
@@ -535,7 +699,7 @@ class FlysticViewModel(application: Application) : AndroidViewModel(application)
             title = title.trim().ifBlank { "Chiến Dịch Tái Chế Tuần" },
             description = description.trim().ifBlank { "Cùng gom rác nhựa sạch và mời mascot về Thành Phố Xanh!" },
             inviteCode = code,
-            inviteLink = "https://flystic.app/campaign/$code",
+            inviteLink = "https://verifour.app/campaign/$code",
             targetKg = targetKg.coerceAtLeast(1.0),
             creatorId = userId,
             habitatTheme = current.personalization.resolvedHabitat(),

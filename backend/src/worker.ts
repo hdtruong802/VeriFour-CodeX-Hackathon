@@ -1,6 +1,8 @@
 type Role = "student" | "admin";
+type AccountStatus = "active" | "locked" | "suspended";
+type AccessOutcome = "success" | "failed" | "blocked";
 type PointDestination = "fundraising" | "rewards";
-type Session = { sub: string; role: Role; stationId?: string | null; exp: number };
+type Session = { sub: string; role: Role; stationId?: string | null; tv?: number; exp: number };
 type UserRow = {
   id: string;
   email: string;
@@ -13,6 +15,10 @@ type UserRow = {
   station_id: string | null;
   points: number;
   total_kg: number;
+  status?: AccountStatus;
+  last_login_at?: number | null;
+  token_version?: number;
+  created_at?: number;
 };
 type TransactionRow = {
   id: string;
@@ -40,7 +46,33 @@ type StationRow = {
   latitude: number | null;
   longitude: number | null;
   capacity_kg: number;
+  is_active?: number;
   filled_kg: number;
+};
+type AccessLogRow = {
+  id: string;
+  user_id: string | null;
+  email: string;
+  role: string | null;
+  event_type: string;
+  outcome: AccessOutcome;
+  ip_address: string | null;
+  user_agent: string | null;
+  detail: string | null;
+  created_at: number;
+};
+type AdminInviteRow = {
+  id: string;
+  code_preview: string;
+  label: string;
+  station_id: string;
+  station_name?: string;
+  max_uses: number;
+  used_count: number;
+  expires_at: number;
+  revoked_at: number | null;
+  created_by: string | null;
+  created_at: number;
 };
 type TransferRow = {
   id: string;
@@ -63,9 +95,12 @@ type DemoCampaignSummary = {
   byQuality: DemoCampaignMetric[];
 };
 type AuthThrottleRow = {
+  throttle_key?: string;
+  email_hint?: string | null;
   failure_count: number;
   window_started_at: number;
   locked_until: number;
+  updated_at?: number;
 };
 type ItemInput = { plasticType: string; quantity: number; cleanliness: string };
 
@@ -237,13 +272,14 @@ async function loginThrottle(env: Env, email: string) {
   return throttleKey;
 }
 
-async function recordLoginFailure(env: Env, throttleKey: string) {
+async function recordLoginFailure(env: Env, throttleKey: string, email: string) {
   const now = Date.now();
   const windowExpiredAt = now - AUTH_FAILURE_WINDOW_MS;
   await env.DB.prepare(
-    `INSERT INTO auth_throttles (throttle_key, failure_count, window_started_at, locked_until, updated_at)
-     VALUES (?, 1, ?, 0, ?)
+    `INSERT INTO auth_throttles (throttle_key, email_hint, failure_count, window_started_at, locked_until, updated_at)
+     VALUES (?, ?, 1, ?, 0, ?)
      ON CONFLICT(throttle_key) DO UPDATE SET
+       email_hint = COALESCE(excluded.email_hint, auth_throttles.email_hint),
        failure_count = CASE
          WHEN auth_throttles.window_started_at <= ? THEN 1
          ELSE auth_throttles.failure_count + 1
@@ -261,6 +297,7 @@ async function recordLoginFailure(env: Env, throttleKey: string) {
   )
     .bind(
       throttleKey,
+      email,
       now,
       now,
       windowExpiredAt,
@@ -305,12 +342,70 @@ async function readSession(request: Request, env: Env): Promise<Session> {
 async function currentUser(request: Request, env: Env) {
   const session = await readSession(request, env);
   const user = await env.DB.prepare(
-    "SELECT id, email, password_hash, password_salt, role, name, student_id, faculty, station_id, points, total_kg FROM users WHERE id = ?",
+    `SELECT id, email, password_hash, password_salt, role, name, student_id, faculty, station_id,
+      points, total_kg, COALESCE(status, 'active') AS status, last_login_at,
+      COALESCE(token_version, 1) AS token_version, created_at
+     FROM users WHERE id = ?`,
   )
     .bind(session.sub)
     .first<UserRow>();
   if (!user) throw new HttpError(401, "Session user no longer exists");
+  if ((user.status ?? "active") !== "active") {
+    throw new HttpError(403, "Account is locked or suspended");
+  }
+  if ((session.tv ?? 1) !== (user.token_version ?? 1)) {
+    throw new HttpError(401, "Session token has been revoked");
+  }
   return { session, user };
+}
+
+async function logAccess(
+  env: Env,
+  params: {
+    userId?: string | null;
+    email: string;
+    role?: string | null;
+    eventType: string;
+    outcome: AccessOutcome;
+    request?: Request;
+    detail?: string | null;
+  },
+) {
+  const ip = params.request?.headers.get("cf-connecting-ip") ?? params.request?.headers.get("x-forwarded-for") ?? null;
+  const ua = params.request?.headers.get("user-agent")?.slice(0, 140) ?? null;
+  await env.DB.prepare(
+    `INSERT INTO access_logs (id, user_id, email, role, event_type, outcome, ip_address, user_agent, detail, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      randomId(),
+      params.userId ?? null,
+      params.email,
+      params.role ?? null,
+      params.eventType,
+      params.outcome,
+      ip,
+      ua,
+      params.detail ?? null,
+      Date.now(),
+    )
+    .run();
+}
+
+async function logAudit(
+  env: Env,
+  actorId: string | null,
+  action: string,
+  entityType: string,
+  entityId: string,
+  metadata?: Record<string, unknown>,
+) {
+  await env.DB.prepare(
+    `INSERT INTO audit_events (id, actor_id, action, entity_type, entity_id, metadata_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(randomId(), actorId, action, entityType, entityId, metadata ? JSON.stringify(metadata) : null, Date.now())
+    .run();
 }
 
 async function publicUser(env: Env, user: UserRow) {
@@ -383,14 +478,15 @@ function calculate(items: ItemInput[]) {
   };
 }
 
-async function stationData(env: Env) {
+async function stationData(env: Env, includeInactive = false) {
+  const whereClause = includeInactive ? "" : "WHERE s.is_active = 1";
   const result = await env.DB.prepare(
     `SELECT
-      s.id, s.name, s.address, s.latitude, s.longitude, s.capacity_kg,
+      s.id, s.name, s.address, s.latitude, s.longitude, s.capacity_kg, s.is_active,
       COALESCE((SELECT SUM(t.weight_kg) FROM transactions t WHERE t.station_id = s.id AND t.status = 'confirmed'), 0)
       - COALESCE((SELECT SUM(r.weight_kg) FROM station_transfers r WHERE r.station_id = s.id), 0) AS filled_kg
     FROM stations s
-    WHERE s.is_active = 1
+    ${whereClause}
     ORDER BY s.name`,
   ).all<StationRow>();
   return result.results.map((station) => ({
@@ -400,6 +496,7 @@ async function stationData(env: Env) {
     latitude: station.latitude,
     longitude: station.longitude,
     capacityKg: station.capacity_kg,
+    isActive: (station.is_active ?? 1) === 1,
     filledKg: +Math.max(0, station.filled_kg).toFixed(2),
     fillPercent: Math.min(
       100,
@@ -601,12 +698,55 @@ async function handleApi(request: Request, env: Env) {
     const role: Role = wantsAdmin ? "admin" : "student";
     const stationId = wantsAdmin ? requireString(input.stationId, "stationId") : null;
     if (wantsAdmin) {
-      if (
-        !env.ADMIN_INVITE_CODE ||
-        typeof input.inviteCode !== "string" ||
-        !(await timingSafeDigestEqual(input.inviteCode, env.ADMIN_INVITE_CODE))
-      ) {
+      const providedCode = typeof input.inviteCode === "string" ? input.inviteCode.trim() : "";
+      const matchesMasterCode =
+        !!env.ADMIN_INVITE_CODE &&
+        !!providedCode &&
+        (await timingSafeDigestEqual(providedCode, env.ADMIN_INVITE_CODE));
+      let usedManagedInviteId: string | null = null;
+      if (!matchesMasterCode && providedCode) {
+        const nowCheck = Date.now();
+        const inviteRow = await env.DB.prepare(
+          `SELECT id, station_id, max_uses, used_count, expires_at, revoked_at
+           FROM admin_invites
+           WHERE code_hash = ?`,
+        )
+          .bind(await digest(providedCode))
+          .first<{
+            id: string;
+            station_id: string;
+            max_uses: number;
+            used_count: number;
+            expires_at: number;
+            revoked_at: number | null;
+          }>();
+        if (
+          inviteRow &&
+          inviteRow.revoked_at === null &&
+          inviteRow.expires_at > nowCheck &&
+          inviteRow.used_count < inviteRow.max_uses &&
+          inviteRow.station_id === stationId
+        ) {
+          usedManagedInviteId = inviteRow.id;
+        }
+      }
+      if (!matchesMasterCode && !usedManagedInviteId) {
+        await logAccess(env, {
+          email,
+          role: "admin",
+          eventType: "register_admin_denied",
+          outcome: "blocked",
+          request,
+          detail: "Invalid or expired admin invite code",
+        });
         throw new HttpError(403, "A valid admin invite is required");
+      }
+      if (usedManagedInviteId) {
+        await env.DB.prepare(
+          "UPDATE admin_invites SET used_count = used_count + 1 WHERE id = ? AND used_count < max_uses",
+        )
+          .bind(usedManagedInviteId)
+          .run();
       }
       const station = await env.DB.prepare("SELECT id FROM stations WHERE id = ? AND is_active = 1")
         .bind(stationId)
@@ -627,10 +767,14 @@ async function handleApi(request: Request, env: Env) {
       station_id: stationId,
       points: 0,
       total_kg: 0,
+      status: "active",
+      last_login_at: now,
+      token_version: 1,
+      created_at: now,
     };
     await env.DB.prepare(
-      `INSERT INTO users (id, email, password_hash, password_salt, role, name, student_id, faculty, station_id, points, total_kg, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+      `INSERT INTO users (id, email, password_hash, password_salt, role, name, student_id, faculty, station_id, points, total_kg, status, last_login_at, token_version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'active', ?, 1, ?, ?)`,
     )
       .bind(
         user.id,
@@ -644,10 +788,20 @@ async function handleApi(request: Request, env: Env) {
         user.station_id,
         now,
         now,
+        now,
       )
       .run();
+    await logAccess(env, {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      eventType: "register",
+      outcome: "success",
+      request,
+      detail: wantsAdmin ? `Admin registered for station ${stationId}` : "Student registered",
+    });
     const token = await signSession(
-      { sub: user.id, role: user.role, stationId, exp: now + 7 * 86_400_000 },
+      { sub: user.id, role: user.role, stationId, tv: 1, exp: now + 7 * 86_400_000 },
       env.AUTH_SECRET,
     );
     return json(request, env, { token, user: await publicUser(env, user) }, 201);
@@ -658,9 +812,24 @@ async function handleApi(request: Request, env: Env) {
     const email = requireString(input.email, "email").toLowerCase();
     const password = requireString(input.password, "password");
     await enforceAuthRateLimit(env, "login", email);
-    const throttleKey = await loginThrottle(env, email);
+    let throttleKey: string;
+    try {
+      throttleKey = await loginThrottle(env, email);
+    } catch (error) {
+      await logAccess(env, {
+        email,
+        eventType: "login_locked",
+        outcome: "blocked",
+        request,
+        detail: error instanceof HttpError ? error.message : "Rate limit lockout",
+      });
+      throw error;
+    }
     const user = await env.DB.prepare(
-      "SELECT id, email, password_hash, password_salt, role, name, student_id, faculty, station_id, points, total_kg FROM users WHERE email = ?",
+      `SELECT id, email, password_hash, password_salt, role, name, student_id, faculty, station_id,
+        points, total_kg, COALESCE(status, 'active') AS status, last_login_at,
+        COALESCE(token_version, 1) AS token_version
+       FROM users WHERE email = ?`,
     )
       .bind(email)
       .first<UserRow>();
@@ -668,16 +837,51 @@ async function handleApi(request: Request, env: Env) {
       !user ||
       !(await verifyPassword(password, user.password_hash, user.password_salt, env.PASSWORD_PEPPER))
     ) {
-      await recordLoginFailure(env, throttleKey);
+      await recordLoginFailure(env, throttleKey, email);
+      await logAccess(env, {
+        userId: user?.id ?? null,
+        email,
+        role: user?.role ?? null,
+        eventType: "login_failed",
+        outcome: "failed",
+        request,
+        detail: "Invalid email or password",
+      });
       throw new HttpError(401, "Email or password is incorrect");
     }
+    if ((user.status ?? "active") !== "active") {
+      await logAccess(env, {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        eventType: "login_blocked_account_status",
+        outcome: "blocked",
+        request,
+        detail: `Account status is ${user.status}`,
+      });
+      throw new HttpError(403, `Account is ${user.status}`);
+    }
+    const now = Date.now();
     await clearLoginThrottle(env, throttleKey);
+    await env.DB.prepare("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?")
+      .bind(now, now, user.id)
+      .run();
+    await logAccess(env, {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      eventType: "login_success",
+      outcome: "success",
+      request,
+      detail: user.station_id ? `Station ${user.station_id}` : "Student login",
+    });
     const token = await signSession(
       {
         sub: user.id,
         role: user.role,
         stationId: user.station_id,
-        exp: Date.now() + 7 * 86_400_000,
+        tv: user.token_version ?? 1,
+        exp: now + 7 * 86_400_000,
       },
       env.AUTH_SECRET,
     );
@@ -891,7 +1095,562 @@ async function handleApi(request: Request, env: Env) {
     )
       .bind(randomId(), stationId, user.id, weightKg, now, optionalString(input.note))
       .run();
+    await logAudit(env, user.id, "station_transfer", "station", stationId, { weightKg });
     return json(request, env, { stationId, weightKg, createdAt: now }, 201);
+  }
+
+  // --- Admin Operations, Account, Token & Access Governance ---
+  if (request.method === "GET" && path === "/admin/ops/overview") {
+    const { user } = await currentUser(request, env);
+    if (user.role !== "admin") throw new HttpError(403, "Admin access required");
+    const now = Date.now();
+    const last24h = now - 86_400_000;
+    const [allStations, userCounts, txCounts, lockoutsRow, failedAccessRow, pendingByStation] =
+      await Promise.all([
+        stationData(env, true),
+        env.DB.prepare(
+          `SELECT
+            COUNT(*) AS total_users,
+            SUM(CASE WHEN role = 'student' THEN 1 ELSE 0 END) AS student_count,
+            SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) AS admin_count,
+            SUM(CASE WHEN COALESCE(status, 'active') = 'active' THEN 1 ELSE 0 END) AS active_users,
+            SUM(CASE WHEN COALESCE(status, 'active') = 'locked' THEN 1 ELSE 0 END) AS locked_users,
+            SUM(CASE WHEN COALESCE(status, 'active') = 'suspended' THEN 1 ELSE 0 END) AS suspended_users
+           FROM users`,
+        ).first<{
+          total_users: number;
+          student_count: number;
+          admin_count: number;
+          active_users: number;
+          locked_users: number;
+          suspended_users: number;
+        }>(),
+        env.DB.prepare(
+          `SELECT
+            SUM(CASE WHEN status = 'pending' AND expires_at > ? THEN 1 ELSE 0 END) AS active_qr,
+            SUM(CASE WHEN status = 'expired' OR (status = 'pending' AND expires_at <= ?) THEN 1 ELSE 0 END) AS expired_qr,
+            SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed_qr,
+            SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_qr
+           FROM transactions`,
+        )
+          .bind(now, now)
+          .first<{
+            active_qr: number;
+            expired_qr: number;
+            confirmed_qr: number;
+            cancelled_qr: number;
+          }>(),
+        env.DB.prepare("SELECT COUNT(*) AS count FROM auth_throttles WHERE locked_until > ?")
+          .bind(now)
+          .first<{ count: number }>(),
+        env.DB.prepare(
+          "SELECT COUNT(*) AS count FROM access_logs WHERE outcome != 'success' AND created_at >= ?",
+        )
+          .bind(last24h)
+          .first<{ count: number }>(),
+        env.DB.prepare(
+          `SELECT station_id,
+            SUM(CASE WHEN status = 'pending' AND expires_at > ? THEN 1 ELSE 0 END) AS pending_tokens,
+            SUM(CASE WHEN status = 'confirmed' AND confirmed_at >= ? THEN 1 ELSE 0 END) AS confirmed_today
+           FROM transactions
+           GROUP BY station_id`,
+        )
+          .bind(now, last24h)
+          .all<{ station_id: string; pending_tokens: number; confirmed_today: number }>(),
+      ]);
+
+    const perStationMap = new Map(pendingByStation.results.map((r) => [r.station_id, r]));
+    return json(request, env, {
+      stations: allStations.map((s) => ({
+        ...s,
+        pendingTokens: perStationMap.get(s.id)?.pending_tokens ?? 0,
+        confirmedToday: perStationMap.get(s.id)?.confirmed_today ?? 0,
+      })),
+      accounts: {
+        total: userCounts?.total_users ?? 0,
+        students: userCounts?.student_count ?? 0,
+        admins: userCounts?.admin_count ?? 0,
+        active: userCounts?.active_users ?? 0,
+        locked: userCounts?.locked_users ?? 0,
+        suspended: userCounts?.suspended_users ?? 0,
+      },
+      tokens: {
+        activeQr: txCounts?.active_qr ?? 0,
+        expiredQr: txCounts?.expired_qr ?? 0,
+        confirmedQr: txCounts?.confirmed_qr ?? 0,
+        cancelledQr: txCounts?.cancelled_qr ?? 0,
+      },
+      security: {
+        activeLockouts: lockoutsRow?.count ?? 0,
+        failedOrBlocked24h: failedAccessRow?.count ?? 0,
+      },
+    });
+  }
+
+  if (request.method === "GET" && path === "/admin/users") {
+    const { user } = await currentUser(request, env);
+    if (user.role !== "admin") throw new HttpError(403, "Admin access required");
+    const search = (url.searchParams.get("search") ?? "").trim().toLowerCase();
+    const roleFilter = url.searchParams.get("role");
+    const statusFilter = url.searchParams.get("status");
+
+    const rows = await env.DB.prepare(
+      `SELECT u.id, u.email, u.role, u.name, u.student_id, u.faculty, u.station_id,
+        s.name AS station_name, u.points, u.total_kg,
+        COALESCE(u.status, 'active') AS status,
+        COALESCE(u.token_version, 1) AS token_version,
+        u.last_login_at, u.created_at
+       FROM users u
+       LEFT JOIN stations s ON s.id = u.station_id
+       ORDER BY CASE WHEN u.role = 'admin' THEN 0 ELSE 1 END, u.created_at DESC
+       LIMIT 300`,
+    ).all<{
+      id: string;
+      email: string;
+      role: Role;
+      name: string;
+      student_id: string | null;
+      faculty: string | null;
+      station_id: string | null;
+      station_name: string | null;
+      points: number;
+      total_kg: number;
+      status: AccountStatus;
+      token_version: number;
+      last_login_at: number | null;
+      created_at: number;
+    }>();
+
+    const filtered = rows.results.filter((r) => {
+      if (roleFilter && roleFilter !== "all" && r.role !== roleFilter) return false;
+      if (statusFilter && statusFilter !== "all" && r.status !== statusFilter) return false;
+      if (search) {
+        const hay = `${r.name} ${r.email} ${r.student_id ?? ""} ${r.faculty ?? ""} ${r.station_name ?? ""}`.toLowerCase();
+        if (!hay.includes(search)) return false;
+      }
+      return true;
+    });
+
+    return json(
+      request,
+      env,
+      filtered.map((r) => ({
+        id: r.id,
+        email: r.email,
+        role: r.role,
+        name: r.name,
+        studentId: r.student_id,
+        faculty: r.faculty,
+        stationId: r.station_id,
+        collectionPoint: r.station_name,
+        points: r.points,
+        totalKg: r.total_kg,
+        status: r.status,
+        tokenVersion: r.token_version,
+        lastLoginAt: r.last_login_at,
+        createdAt: r.created_at,
+      })),
+    );
+  }
+
+  if (request.method === "POST" && path === "/admin/users") {
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    const input = await body(request);
+    const email = requireString(input.email, "email").toLowerCase();
+    const name = requireString(input.name, "name");
+    const password = requireString(input.password, "password");
+    if (!/^\S+@\S+\.\S+$/.test(email) || password.length < 8) {
+      throw new HttpError(400, "Use a valid email and password of at least 8 characters");
+    }
+    const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+    if (existing) throw new HttpError(409, "Email already registered");
+    const role: Role = input.role === "admin" ? "admin" : "student";
+    const stationId = role === "admin" ? requireString(input.stationId, "stationId") : null;
+    if (stationId) {
+      const station = await env.DB.prepare("SELECT id FROM stations WHERE id = ?").bind(stationId).first();
+      if (!station) throw new HttpError(400, "Station not found");
+    }
+    const passwordData = await passwordRecord(password, env.PASSWORD_PEPPER);
+    const now = Date.now();
+    const id = randomId();
+    await env.DB.prepare(
+      `INSERT INTO users (id, email, password_hash, password_salt, role, name, student_id, faculty, station_id, points, total_kg, status, token_version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'active', 1, ?, ?)`,
+    )
+      .bind(
+        id,
+        email,
+        passwordData.hash,
+        passwordData.salt,
+        role,
+        name,
+        optionalString(input.studentId),
+        optionalString(input.faculty),
+        stationId,
+        now,
+        now,
+      )
+      .run();
+    await logAudit(env, actor.id, "account_created", "user", id, { email, role, stationId });
+    await logAccess(env, {
+      userId: actor.id,
+      email: actor.email,
+      role: actor.role,
+      eventType: "account_created",
+      outcome: "success",
+      request,
+      detail: `Created ${role} account for ${email}`,
+    });
+    return json(request, env, { id, email, name, role, stationId, status: "active", tokenVersion: 1, createdAt: now }, 201);
+  }
+
+  const userStatusMatch = path.match(/^\/admin\/users\/([^/]+)\/status$/);
+  if (request.method === "POST" && userStatusMatch) {
+    const targetId = userStatusMatch[1];
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    if (targetId === actor.id) throw new HttpError(400, "Cannot change your own account status");
+    const input = await body(request);
+    const nextStatus = input.status;
+    if (nextStatus !== "active" && nextStatus !== "locked" && nextStatus !== "suspended") {
+      throw new HttpError(400, "Invalid account status");
+    }
+    const now = Date.now();
+    const bumpToken = nextStatus !== "active" ? 1 : 0;
+    const result = await env.DB.prepare(
+      `UPDATE users
+       SET status = ?, token_version = COALESCE(token_version, 1) + ?, updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(nextStatus, bumpToken, now, targetId)
+      .run();
+    if (result.meta.changes !== 1) throw new HttpError(404, "User not found");
+    const target = await env.DB.prepare("SELECT email, role FROM users WHERE id = ?")
+      .bind(targetId)
+      .first<{ email: string; role: string }>();
+    await logAudit(env, actor.id, "account_status_changed", "user", targetId, { status: nextStatus });
+    await logAccess(env, {
+      userId: actor.id,
+      email: actor.email,
+      role: actor.role,
+      eventType: `account_${nextStatus}`,
+      outcome: nextStatus === "active" ? "success" : "blocked",
+      request,
+      detail: `Set ${target?.email ?? targetId} status to ${nextStatus}`,
+    });
+    return json(request, env, { id: targetId, status: nextStatus, updatedAt: now });
+  }
+
+  const userRoleMatch = path.match(/^\/admin\/users\/([^/]+)\/role$/);
+  if (request.method === "POST" && userRoleMatch) {
+    const targetId = userRoleMatch[1];
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    const input = await body(request);
+    const nextRole: Role = input.role === "admin" ? "admin" : "student";
+    const stationId = nextRole === "admin" ? requireString(input.stationId, "stationId") : null;
+    if (stationId) {
+      const station = await env.DB.prepare("SELECT id FROM stations WHERE id = ?").bind(stationId).first();
+      if (!station) throw new HttpError(400, "Station not found");
+    }
+    const now = Date.now();
+    const result = await env.DB.prepare(
+      "UPDATE users SET role = ?, station_id = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(nextRole, stationId, now, targetId)
+      .run();
+    if (result.meta.changes !== 1) throw new HttpError(404, "User not found");
+    await logAudit(env, actor.id, "account_role_changed", "user", targetId, { role: nextRole, stationId });
+    await logAccess(env, {
+      userId: actor.id,
+      email: actor.email,
+      role: actor.role,
+      eventType: "account_role_updated",
+      outcome: "success",
+      request,
+      detail: `Updated ${targetId} to ${nextRole}${stationId ? ` @ ${stationId}` : ""}`,
+    });
+    return json(request, env, { id: targetId, role: nextRole, stationId, updatedAt: now });
+  }
+
+  const revokeUserTokensMatch = path.match(/^\/admin\/users\/([^/]+)\/revoke-tokens$/);
+  if (request.method === "POST" && revokeUserTokensMatch) {
+    const targetId = revokeUserTokensMatch[1];
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    const now = Date.now();
+    const result = await env.DB.prepare(
+      "UPDATE users SET token_version = COALESCE(token_version, 1) + 1, updated_at = ? WHERE id = ?",
+    )
+      .bind(now, targetId)
+      .run();
+    if (result.meta.changes !== 1) throw new HttpError(404, "User not found");
+    const updated = await env.DB.prepare("SELECT email, token_version FROM users WHERE id = ?")
+      .bind(targetId)
+      .first<{ email: string; token_version: number }>();
+    await logAudit(env, actor.id, "session_tokens_revoked", "user", targetId, {
+      tokenVersion: updated?.token_version,
+    });
+    await logAccess(env, {
+      userId: actor.id,
+      email: actor.email,
+      role: actor.role,
+      eventType: "token_revoked",
+      outcome: "blocked",
+      request,
+      detail: `Revoked session tokens for ${updated?.email ?? targetId} (v${updated?.token_version ?? 2})`,
+    });
+    return json(request, env, { id: targetId, tokenVersion: updated?.token_version ?? 2 });
+  }
+
+  if (request.method === "GET" && path === "/admin/tokens") {
+    const { user } = await currentUser(request, env);
+    if (user.role !== "admin") throw new HttpError(403, "Admin access required");
+    const [txRows, inviteRows] = await Promise.all([
+      env.DB.prepare(
+        `SELECT t.id, t.station_id, t.admin_id, t.student_id, t.items_json, t.total_quantity,
+          t.weight_kg, t.points, t.status, t.created_at, t.expires_at, t.confirmed_at,
+          s.name AS station_name, u.name AS student_name, u.faculty AS student_faculty
+         FROM transactions t
+         JOIN stations s ON s.id = t.station_id
+         LEFT JOIN users u ON u.id = t.student_id
+         ORDER BY t.created_at DESC
+         LIMIT 200`,
+      ).all<TransactionViewRow>(),
+      env.DB.prepare(
+        `SELECT i.id, i.code_preview, i.label, i.station_id, s.name AS station_name,
+          i.max_uses, i.used_count, i.expires_at, i.revoked_at, i.created_by, i.created_at
+         FROM admin_invites i
+         LEFT JOIN stations s ON s.id = i.station_id
+         ORDER BY i.created_at DESC
+         LIMIT 100`,
+      ).all<AdminInviteRow>(),
+    ]);
+    return json(request, env, {
+      qrTransactions: txRows.results.map((tx) => transactionView(tx)),
+      invites: inviteRows.results.map((inv) => ({
+        id: inv.id,
+        code: inv.code_preview,
+        label: inv.label,
+        stationId: inv.station_id,
+        stationName: inv.station_name ?? inv.station_id,
+        maxUses: inv.max_uses,
+        usedCount: inv.used_count,
+        expiresAt: inv.expires_at,
+        isRevoked: inv.revoked_at !== null,
+        createdAt: inv.created_at,
+      })),
+    });
+  }
+
+  const revokeTokenMatch = path.match(/^\/admin\/tokens\/([^/]+)\/revoke$/);
+  if (request.method === "POST" && revokeTokenMatch) {
+    const txId = revokeTokenMatch[1];
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    const now = Date.now();
+    const result = await env.DB.prepare(
+      "UPDATE transactions SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND status = 'pending'",
+    )
+      .bind(now, txId)
+      .run();
+    if (result.meta.changes !== 1) throw new HttpError(409, "Pending QR token not found");
+    await logAudit(env, actor.id, "qr_token_revoked", "transaction", txId);
+    await logAccess(env, {
+      userId: actor.id,
+      email: actor.email,
+      role: actor.role,
+      eventType: "qr_token_revoked",
+      outcome: "blocked",
+      request,
+      detail: `Revoked pending QR token ${txId}`,
+    });
+    return json(request, env, { id: txId, cancelledAt: now });
+  }
+
+  if (request.method === "POST" && path === "/admin/tokens/expire-stale") {
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    const now = Date.now();
+    const result = await env.DB.prepare(
+      "UPDATE transactions SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?",
+    )
+      .bind(now)
+      .run();
+    return json(request, env, { expiredCount: result.meta.changes ?? 0 });
+  }
+
+  if (request.method === "POST" && path === "/admin/invites") {
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    const input = await body(request);
+    const label = requireString(input.label, "label");
+    const stationId = requireString(input.stationId, "stationId");
+    const station = await env.DB.prepare("SELECT id, name FROM stations WHERE id = ?")
+      .bind(stationId)
+      .first<{ id: string; name: string }>();
+    if (!station) throw new HttpError(400, "Station not found");
+    const maxUses = Math.max(1, Math.min(50, Number(input.maxUses ?? 3) || 3));
+    const ttlHours = Math.max(1, Math.min(720, Number(input.ttlHours ?? 24) || 24));
+    const now = Date.now();
+    const expiresAt = now + ttlHours * 3_600_000;
+    const rawCode = `ADM-${randomToken().slice(0, 4)}-${randomToken().slice(0, 4)}`;
+    const id = randomId();
+    await env.DB.prepare(
+      `INSERT INTO admin_invites (id, code_hash, code_preview, label, station_id, max_uses, used_count, expires_at, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+    )
+      .bind(id, await digest(rawCode), rawCode, label, stationId, maxUses, expiresAt, actor.id, now)
+      .run();
+    await logAudit(env, actor.id, "admin_invite_created", "admin_invite", id, { stationId, maxUses, ttlHours });
+    await logAccess(env, {
+      userId: actor.id,
+      email: actor.email,
+      role: actor.role,
+      eventType: "invite_created",
+      outcome: "success",
+      request,
+      detail: `Created invite ${rawCode} for ${station.name}`,
+    });
+    return json(
+      request,
+      env,
+      {
+        id,
+        code: rawCode,
+        label,
+        stationId,
+        stationName: station.name,
+        maxUses,
+        usedCount: 0,
+        expiresAt,
+        isRevoked: false,
+        createdAt: now,
+      },
+      201,
+    );
+  }
+
+  const revokeInviteMatch = path.match(/^\/admin\/invites\/([^/]+)\/revoke$/);
+  if (request.method === "POST" && revokeInviteMatch) {
+    const inviteId = revokeInviteMatch[1];
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    const now = Date.now();
+    const result = await env.DB.prepare(
+      "UPDATE admin_invites SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    )
+      .bind(now, inviteId)
+      .run();
+    if (result.meta.changes !== 1) throw new HttpError(404, "Invite token not found or already revoked");
+    await logAudit(env, actor.id, "admin_invite_revoked", "admin_invite", inviteId);
+    await logAccess(env, {
+      userId: actor.id,
+      email: actor.email,
+      role: actor.role,
+      eventType: "invite_revoked",
+      outcome: "blocked",
+      request,
+      detail: `Revoked invite token ${inviteId}`,
+    });
+    return json(request, env, { id: inviteId, revokedAt: now });
+  }
+
+  if (request.method === "GET" && path === "/admin/access-logs") {
+    const { user } = await currentUser(request, env);
+    if (user.role !== "admin") throw new HttpError(403, "Admin access required");
+    const now = Date.now();
+    const [logsResult, lockoutsResult] = await Promise.all([
+      env.DB.prepare(
+        `SELECT id, user_id, email, role, event_type, outcome, ip_address, user_agent, detail, created_at
+         FROM access_logs
+         ORDER BY created_at DESC
+         LIMIT 200`,
+      ).all<AccessLogRow>(),
+      env.DB.prepare(
+        `SELECT throttle_key, email_hint, failure_count, locked_until, updated_at
+         FROM auth_throttles
+         WHERE locked_until > ?
+         ORDER BY locked_until DESC
+         LIMIT 50`,
+      )
+        .bind(now)
+        .all<AuthThrottleRow>(),
+    ]);
+    return json(request, env, {
+      logs: logsResult.results.map((l) => ({
+        id: l.id,
+        userId: l.user_id,
+        email: l.email,
+        role: l.role,
+        eventType: l.event_type,
+        outcome: l.outcome,
+        ipAddress: l.ip_address,
+        deviceInfo: l.user_agent,
+        detail: l.detail,
+        createdAt: l.created_at,
+      })),
+      lockouts: lockoutsResult.results.map((t) => ({
+        throttleKey: t.throttle_key ?? "",
+        emailHint: t.email_hint ?? "Unknown email",
+        failureCount: t.failure_count,
+        lockedUntil: t.locked_until,
+        updatedAt: t.updated_at ?? now,
+      })),
+    });
+  }
+
+  if (request.method === "POST" && path === "/admin/throttles/clear") {
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    const input = await body(request);
+    const throttleKey = optionalString(input.throttleKey);
+    if (throttleKey) {
+      await env.DB.prepare("DELETE FROM auth_throttles WHERE throttle_key = ?")
+        .bind(throttleKey)
+        .run();
+    } else {
+      await env.DB.prepare("DELETE FROM auth_throttles WHERE locked_until > 0").run();
+    }
+    await logAccess(env, {
+      userId: actor.id,
+      email: actor.email,
+      role: actor.role,
+      eventType: "throttle_cleared",
+      outcome: "success",
+      request,
+      detail: throttleKey ? `Unlocked auth throttle ${throttleKey.slice(0, 8)}` : "Cleared all auth lockouts",
+    });
+    return json(request, env, { cleared: true });
+  }
+
+  const toggleStationMatch = path.match(/^\/admin\/stations\/([^/]+)\/toggle$/);
+  if (request.method === "POST" && toggleStationMatch) {
+    const stationId = toggleStationMatch[1];
+    const { user: actor } = await currentUser(request, env);
+    if (actor.role !== "admin") throw new HttpError(403, "Admin access required");
+    const station = await env.DB.prepare("SELECT id, name, is_active FROM stations WHERE id = ?")
+      .bind(stationId)
+      .first<{ id: string; name: string; is_active: number }>();
+    if (!station) throw new HttpError(404, "Station not found");
+    const nextActive = station.is_active === 1 ? 0 : 1;
+    await env.DB.prepare("UPDATE stations SET is_active = ? WHERE id = ?")
+      .bind(nextActive, stationId)
+      .run();
+    await logAudit(env, actor.id, "station_toggled", "station", stationId, {
+      isActive: nextActive === 1,
+    });
+    await logAccess(env, {
+      userId: actor.id,
+      email: actor.email,
+      role: actor.role,
+      eventType: nextActive === 1 ? "station_resumed" : "station_paused",
+      outcome: "success",
+      request,
+      detail: `${station.name} -> ${nextActive === 1 ? "active" : "paused"}`,
+    });
+    return json(request, env, { id: stationId, isActive: nextActive === 1 });
   }
 
   throw new HttpError(404, "Route not found");

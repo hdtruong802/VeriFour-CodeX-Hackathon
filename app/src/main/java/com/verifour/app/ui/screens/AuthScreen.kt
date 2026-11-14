@@ -1,5 +1,6 @@
 package com.verifour.app.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -49,11 +50,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.verifour.app.R
+import com.verifour.app.data.FlysticApiClient
 import com.verifour.app.i18n.FlysticTranslations
 import com.verifour.app.model.AppLocale
 import com.verifour.app.model.COLLECTION_POINTS
@@ -81,8 +86,11 @@ import java.util.Locale
 fun AuthScreen(
     locale: AppLocale,
     isRemote: Boolean,
+    serverUrl: String,
     onLocaleChange: (AppLocale) -> Unit,
     onRemoteModeChange: (Boolean) -> Unit,
+    onServerUrlChange: (String) -> Unit,
+    onTestServerConnection: suspend (String) -> Result<String>,
     onBackHome: () -> Unit,
     onSubmitAuth: suspend (
         email: String,
@@ -122,6 +130,11 @@ fun AuthScreen(
     var inviteCode by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var isSubmitting by remember { mutableStateOf(false) }
+
+    var serverUrlInput by remember(serverUrl) { mutableStateOf(serverUrl) }
+    var isPingingServer by remember { mutableStateOf(false) }
+    var pingSuccess by remember { mutableStateOf<Boolean?>(null) }
+    var pingMessage by remember { mutableStateOf<String?>(null) }
 
     val passwordMismatch = isRegister && confirmPassword.isNotEmpty() && password != confirmPassword
     val isStudentReg = isRegister && role == Role.STUDENT
@@ -183,25 +196,146 @@ fun AuthScreen(
                     )
                 }
 
+                if (isRemote) {
+                    EcoCard(contentPadding = 14.dp) {
+                        AuthFieldLabel(t("authServerUrlLabel"))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = serverUrlInput,
+                                onValueChange = {
+                                    serverUrlInput = it
+                                    pingSuccess = null
+                                    pingMessage = null
+                                },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                placeholder = {
+                                    Text(
+                                        FlysticApiClient.DEFAULT_BASE_URL,
+                                        fontSize = 12.sp,
+                                        color = EcoMutedForeground.copy(alpha = 0.7f)
+                                    )
+                                },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = EcoSecondary,
+                                    unfocusedContainerColor = EcoSecondary,
+                                    focusedBorderColor = EcoPrimary,
+                                    unfocusedBorderColor = EcoBorder
+                                )
+                            )
+                            Button(
+                                onClick = {
+                                    isPingingServer = true
+                                    pingSuccess = null
+                                    pingMessage = null
+                                    scope.launch {
+                                        val res = onTestServerConnection(serverUrlInput)
+                                        isPingingServer = false
+                                        res.onSuccess {
+                                            serverUrlInput = FlysticApiClient.normalizeBaseUrl(serverUrlInput)
+                                            pingSuccess = true
+                                            pingMessage = t("authServerOk")
+                                        }.onFailure { err ->
+                                            pingSuccess = false
+                                            pingMessage = "${t("authServerFail")}: ${err.message.orEmpty()}"
+                                        }
+                                    }
+                                },
+                                enabled = !isPingingServer && serverUrlInput.isNotBlank(),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = EcoPrimary,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp)
+                            ) {
+                                Text(
+                                    text = if (isPingingServer) t("authServerPinging") else t("authServerPing"),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            PresetChip(
+                                label = "Mac LAN",
+                                selected = serverUrlInput.trimEnd('/') == FlysticApiClient.DEFAULT_BASE_URL,
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    val next = onServerUrlChangePreset(FlysticApiClient.DEFAULT_BASE_URL, onServerUrlChange)
+                                    serverUrlInput = next
+                                    pingSuccess = null
+                                    pingMessage = null
+                                }
+                            )
+                            PresetChip(
+                                label = "Emulator",
+                                selected = serverUrlInput.contains("10.0.2.2"),
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    val next = onServerUrlChangePreset("http://10.0.2.2:8787", onServerUrlChange)
+                                    serverUrlInput = next
+                                    pingSuccess = null
+                                    pingMessage = null
+                                }
+                            )
+                            PresetChip(
+                                label = "Cloud",
+                                selected = serverUrlInput.contains("api.yoha.io.vn"),
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    val next = onServerUrlChangePreset("https://api.yoha.io.vn", onServerUrlChange)
+                                    serverUrlInput = next
+                                    pingSuccess = null
+                                    pingMessage = null
+                                }
+                            )
+                        }
+
+                        if (pingMessage != null) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = pingMessage.orEmpty(),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (pingSuccess == true) EcoPrimary else EcoCoral
+                            )
+                        }
+                    }
+                }
+
                 EcoCard(contentPadding = 22.dp) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
+                                .size(44.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(EcoPrimary),
+                                .background(Color.White)
+                                .border(1.dp, EcoBorder, RoundedCornerShape(12.dp))
+                                .padding(3.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "F",
-                                color = Color.White,
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 20.sp
+                            Image(
+                                painter = painterResource(R.drawable.verifour_avatar),
+                                contentDescription = "VeriFour",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize()
                             )
                         }
                         Spacer(Modifier.width(10.dp))
                         Text(
-                            text = "FLYSTIC",
+                            text = "VeriFour",
                             fontSize = 24.sp,
                             fontWeight = FontWeight.Bold,
                             color = EcoForeground
@@ -492,6 +626,9 @@ fun AuthScreen(
                             isSubmitting = true
                             scope.launch {
                                 try {
+                                    if (isRemote && serverUrlInput.isNotBlank()) {
+                                        onServerUrlChange(serverUrlInput)
+                                    }
                                     val user = onSubmitAuth(
                                         email,
                                         password,
@@ -534,6 +671,38 @@ fun AuthScreen(
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp
                         )
+                    }
+
+                    if (!isRegister && isRemote) {
+                        Spacer(Modifier.height(14.dp))
+                        AuthFieldLabel(t("authQuickDemoTitle"))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            PresetChip(
+                                label = t("authQuickDemoStudent"),
+                                selected = email == "sinhvien@sis.hust.edu.vn",
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    role = Role.STUDENT
+                                    email = "sinhvien@sis.hust.edu.vn"
+                                    password = "student1234"
+                                    error = null
+                                }
+                            )
+                            PresetChip(
+                                label = t("authQuickDemoAdmin"),
+                                selected = email == "admin@hust.edu.vn",
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    role = Role.ADMIN
+                                    email = "admin@hust.edu.vn"
+                                    password = "admin1234"
+                                    error = null
+                                }
+                            )
+                        }
                     }
 
                     Spacer(Modifier.height(16.dp))
@@ -617,6 +786,44 @@ private fun ModeTab(
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             color = if (selected) EcoForeground else EcoMutedForeground
+        )
+    }
+}
+
+private fun onServerUrlChangePreset(
+    presetUrl: String,
+    onServerUrlChange: (String) -> Unit
+): String {
+    onServerUrlChange(presetUrl)
+    return presetUrl
+}
+
+@Composable
+private fun PresetChip(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) EcoPrimary.copy(alpha = 0.14f) else EcoSecondary)
+            .border(
+                width = 1.dp,
+                color = if (selected) EcoPrimary else EcoBorder,
+                shape = RoundedCornerShape(10.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (selected) EcoPrimary else EcoMutedForeground,
+            maxLines = 1
         )
     }
 }

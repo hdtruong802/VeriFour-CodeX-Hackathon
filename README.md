@@ -1,6 +1,6 @@
-# FLYSTIC
+# VeriFour
 
-FLYSTIC is a campus plastic-collection platform. Students bring plastic to collection stations, confirm transactions with QR codes, earn points, and choose whether to use those points for rewards or community fundraising. Station administrators can create transactions, monitor collected plastic, record transfers, and view reports.
+VeriFour is a campus plastic-collection platform. Students bring plastic to collection stations, confirm transactions with QR codes, earn points, and choose whether to use those points for rewards or community fundraising. Station administrators can create transactions, monitor collected plastic, record transfers, and view reports.
 
 The interface supports Vietnamese, English, and Korean, works on desktop and mobile devices, and can be installed as a Progressive Web App (PWA).
 
@@ -46,7 +46,7 @@ The project contains two independent Cloudflare Workers:
 
 When `VITE_API_BASE_URL` is not defined, the frontend switches to demo mode and stores state in `localStorage`. When the variable is set, authentication, transactions, points, and reports are loaded from the API and D1.
 
-> The current product name is **FLYSTIC**. Legacy technical names such as `yoha-web`, `yoha-api`, the `yoha` database, and `yoha:*` storage keys remain in use for compatibility with existing infrastructure and data.
+> The current product name is **VeriFour**. Legacy technical names such as `yoha-web`, `yoha-api`, the `yoha` database, and `yoha:*` storage keys remain in use for compatibility with existing infrastructure and data.
 
 ## Technology stack
 

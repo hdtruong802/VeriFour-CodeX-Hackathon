@@ -6,6 +6,9 @@ dist/
 .env
 .env.*
 !.env.example
+*.sqlite
+*.db
+backend/.local_demo.sqlite*
 
 # Android / Gradle
 *.iml

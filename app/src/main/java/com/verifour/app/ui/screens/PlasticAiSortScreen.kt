@@ -1,9 +1,14 @@
 package com.verifour.app.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -61,6 +66,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.verifour.app.data.DetectionVerdict
+import com.verifour.app.data.FlysticApiClient
 import com.verifour.app.data.OpenAiPlasticDetector
 import com.verifour.app.data.PlasticDetectionResult
 import com.verifour.app.i18n.FlysticTranslations
@@ -80,11 +86,14 @@ import com.verifour.app.ui.theme.EcoSunshine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 @Composable
 fun PlasticAiSortScreen(
     locale: AppLocale,
+    serverUrl: String = FlysticApiClient.DEFAULT_BASE_URL,
     onBack: () -> Unit,
     contentPadding: PaddingValues = PaddingValues(0.dp)
 ) {
@@ -97,6 +106,7 @@ fun PlasticAiSortScreen(
 
     // Strictly volatile RAM state — nothing is ever written to disk, SharedPreferences, or backend.
     var transientBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var pendingCaptureFile by remember { mutableStateOf<File?>(null) }
     var userHint by remember { mutableStateOf("") }
     var isAnalyzing by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
@@ -104,6 +114,8 @@ fun PlasticAiSortScreen(
 
     fun clearVolatileState() {
         transientBitmap = null
+        pendingCaptureFile?.let { runCatching { it.delete() } }
+        pendingCaptureFile = null
         userHint = ""
         errorMsg = null
         detectionResult = null
@@ -115,13 +127,70 @@ fun PlasticAiSortScreen(
         }
     }
 
-    val cameraLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicturePreview()
-    ) { bitmap ->
-        if (bitmap != null) {
-            transientBitmap = bitmap
-            detectionResult = null
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { saved ->
+        val file = pendingCaptureFile
+        pendingCaptureFile = null
+        if (saved && file != null && file.exists()) {
+            scope.launch {
+                val decoded = withContext(Dispatchers.IO) {
+                    try {
+                        decodeSampledBitmapFromFile(file, maxDim = 1024)
+                    } finally {
+                        runCatching { file.delete() }
+                    }
+                }
+                if (decoded != null) {
+                    transientBitmap = decoded
+                    detectionResult = null
+                    errorMsg = null
+                }
+            }
+        } else {
+            file?.let { runCatching { it.delete() } }
+        }
+    }
+
+    fun launchCameraCapture() {
+        runCatching {
+            val dir = File(context.cacheDir, "camera_tmp").apply { mkdirs() }
+            val photoFile = File(dir, "ai_scan_${System.currentTimeMillis()}.jpg")
+            val uri: Uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                photoFile
+            )
+            pendingCaptureFile?.let { runCatching { it.delete() } }
+            pendingCaptureFile = photoFile
+            takePictureLauncher.launch(uri)
+        }.onFailure { err ->
+            pendingCaptureFile?.let { runCatching { it.delete() } }
+            pendingCaptureFile = null
+            errorMsg = err.message ?: t("scanCameraDenied")
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
             errorMsg = null
+            launchCameraCapture()
+        } else {
+            errorMsg = t("scanCameraDenied")
+        }
+    }
+
+    fun requestAndLaunchCamera() {
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            launchCameraCapture()
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
@@ -156,7 +225,8 @@ fun PlasticAiSortScreen(
                 detector.detectPlastic(
                     bitmap = transientBitmap,
                     userHint = userHint,
-                    locale = locale
+                    locale = locale,
+                    serverUrl = serverUrl
                 )
             }.onSuccess { res ->
                 detectionResult = res
@@ -277,7 +347,7 @@ fun PlasticAiSortScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Button(
-                        onClick = { cameraLauncher.launch(null) },
+                        onClick = { requestAndLaunchCamera() },
                         modifier = Modifier
                             .weight(1f)
                             .height(44.dp),
@@ -614,7 +684,7 @@ fun PlasticAiSortScreen(
                             }
 
                             Button(
-                                onClick = { cameraLauncher.launch(null) },
+                                onClick = { requestAndLaunchCamera() },
                                 modifier = Modifier.fillMaxWidth().height(42.dp),
                                 shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = EcoPrimary)
@@ -663,4 +733,18 @@ fun PlasticAiSortScreen(
             }
         }
     }
+}
+
+private fun decodeSampledBitmapFromFile(file: File, maxDim: Int): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.absolutePath, bounds)
+    val largest = max(bounds.outWidth, bounds.outHeight)
+    var sampleSize = 1
+    if (largest > maxDim) {
+        while (largest / (sampleSize * 2) >= maxDim) {
+            sampleSize *= 2
+        }
+    }
+    val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    return BitmapFactory.decodeFile(file.absolutePath, opts)
 }

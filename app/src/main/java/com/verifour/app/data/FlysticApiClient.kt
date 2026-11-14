@@ -2,6 +2,7 @@ package com.verifour.app.data
 
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
+import com.verifour.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -148,12 +149,120 @@ data class CancelResponseDto(
     @SerializedName("cancelledAt") val cancelledAt: Long
 )
 
+data class ApiStationOpsDto(
+    val id: String,
+    val name: String,
+    val address: String,
+    val capacityKg: Double,
+    val filledKg: Double,
+    val fillPercent: Int,
+    val isActive: Boolean = true,
+    val pendingTokens: Int = 0,
+    val confirmedToday: Int = 0
+)
+
+data class ApiAdminOpsOverviewDto(
+    val stations: List<ApiStationOpsDto>
+)
+
+data class ApiManagedAccountDto(
+    val id: String,
+    val email: String,
+    val role: String,
+    val name: String,
+    val studentId: String?,
+    val faculty: String?,
+    val stationId: String?,
+    val collectionPoint: String?,
+    val points: Int,
+    val totalKg: Double,
+    val status: String?,
+    val tokenVersion: Int?,
+    val lastLoginAt: Long?,
+    val createdAt: Long?
+)
+
+data class ApiAdminInviteDto(
+    val id: String,
+    val code: String,
+    val label: String,
+    val stationId: String,
+    val stationName: String?,
+    val maxUses: Int,
+    val usedCount: Int,
+    val expiresAt: Long,
+    val isRevoked: Boolean,
+    val createdAt: Long
+)
+
+data class ApiAdminTokensResponseDto(
+    val qrTransactions: List<ApiTransactionDto>,
+    val invites: List<ApiAdminInviteDto>
+)
+
+data class ApiAccessLogDto(
+    val id: String,
+    val userId: String?,
+    val email: String,
+    val role: String?,
+    val eventType: String,
+    val outcome: String,
+    val ipAddress: String?,
+    val deviceInfo: String?,
+    val detail: String?,
+    val createdAt: Long
+)
+
+data class ApiAuthLockoutDto(
+    val throttleKey: String,
+    val emailHint: String,
+    val failureCount: Int,
+    val lockedUntil: Long,
+    val updatedAt: Long
+)
+
+data class ApiAccessLogsResponseDto(
+    val logs: List<ApiAccessLogDto>,
+    val lockouts: List<ApiAuthLockoutDto>
+)
+
+data class ApiSimpleStatusDto(
+    val id: String? = null,
+    val status: String? = null,
+    val tokenVersion: Int? = null,
+    val isActive: Boolean? = null,
+    val expiredCount: Int? = null,
+    val cleared: Boolean? = null
+)
+
 class FlysticApiClient(
-    private val baseUrl: String = DEFAULT_BASE_URL
+    initialBaseUrl: String = DEFAULT_BASE_URL
 ) {
     companion object {
-        const val DEFAULT_BASE_URL = "https://api.yoha.io.vn"
+        val DEFAULT_BASE_URL: String = BuildConfig.FLYSTIC_API_BASE_URL.ifBlank { "https://api.yoha.io.vn" }
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+        fun normalizeBaseUrl(raw: String): String {
+            val trimmed = raw.trim().trimEnd('/')
+            if (trimmed.isBlank()) return DEFAULT_BASE_URL
+            return if (trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true)
+            ) {
+                trimmed
+            } else {
+                "http://$trimmed"
+            }
+        }
+    }
+
+    @Volatile
+    var baseUrl: String = normalizeBaseUrl(initialBaseUrl)
+        private set
+
+    fun updateBaseUrl(newUrl: String): String {
+        val normalized = normalizeBaseUrl(newUrl)
+        baseUrl = normalized
+        return normalized
     }
 
     private val gson = Gson()
@@ -162,6 +271,28 @@ class FlysticApiClient(
         .readTimeout(20, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
+
+    private val pingClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .build()
+
+    suspend fun checkHealth(targetUrl: String = baseUrl): Result<String> = withContext(Dispatchers.IO) {
+        val normalized = normalizeBaseUrl(targetUrl)
+        val req = Request.Builder()
+            .url("$normalized/api/v1/health")
+            .get()
+            .build()
+        runCatching {
+            pingClient.newCall(req).execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    throw FlysticApiException("HTTP ${response.code}", response.code)
+                }
+                raw.ifBlank { "OK" }
+            }
+        }
+    }
 
     private suspend inline fun <reified T> request(
         path: String,
@@ -276,4 +407,108 @@ class FlysticApiClient(
             token = token,
             body = emptyMap<String, Any>()
         )
+
+    // Admin Ops endpoints
+    suspend fun getAdminOpsOverview(token: String): ApiAdminOpsOverviewDto =
+        request("/admin/ops/overview", token = token)
+
+    suspend fun getAdminUsers(token: String): List<ApiManagedAccountDto> {
+        val arr = request<Array<ApiManagedAccountDto>>("/admin/users", token = token)
+        return arr.toList()
+    }
+
+    suspend fun createAdminUser(
+        token: String,
+        name: String,
+        email: String,
+        password: String,
+        role: String,
+        studentId: String?,
+        faculty: String?,
+        stationId: String?
+    ): ApiManagedAccountDto {
+        val payload = buildMap<String, Any> {
+            put("name", name)
+            put("email", email)
+            put("password", password)
+            put("role", role)
+            if (!studentId.isNullOrBlank()) put("studentId", studentId)
+            if (!faculty.isNullOrBlank()) put("faculty", faculty)
+            if (!stationId.isNullOrBlank()) put("stationId", stationId)
+        }
+        return request("/admin/users", method = "POST", token = token, body = payload)
+    }
+
+    suspend fun updateAdminUserStatus(
+        token: String,
+        userId: String,
+        status: String
+    ): ApiSimpleStatusDto =
+        request(
+            "/admin/users/$userId/status",
+            method = "POST",
+            token = token,
+            body = mapOf("status" to status)
+        )
+
+    suspend fun updateAdminUserRole(
+        token: String,
+        userId: String,
+        role: String,
+        stationId: String?
+    ): ApiSimpleStatusDto {
+        val payload = buildMap<String, Any> {
+            put("role", role)
+            if (!stationId.isNullOrBlank()) put("stationId", stationId)
+        }
+        return request("/admin/users/$userId/role", method = "POST", token = token, body = payload)
+    }
+
+    suspend fun revokeAdminUserTokens(token: String, userId: String): ApiSimpleStatusDto =
+        request("/admin/users/$userId/revoke-tokens", method = "POST", token = token)
+
+    suspend fun getAdminTokens(token: String): ApiAdminTokensResponseDto =
+        request("/admin/tokens", token = token)
+
+    suspend fun revokeAdminQrToken(token: String, txId: String): CancelResponseDto =
+        request("/admin/tokens/$txId/revoke", method = "POST", token = token)
+
+    suspend fun expireStaleQrTokens(token: String): ApiSimpleStatusDto =
+        request("/admin/tokens/expire-stale", method = "POST", token = token)
+
+    suspend fun createAdminInvite(
+        token: String,
+        label: String,
+        stationId: String,
+        maxUses: Int,
+        ttlHours: Int
+    ): ApiAdminInviteDto =
+        request(
+            "/admin/invites",
+            method = "POST",
+            token = token,
+            body = mapOf(
+                "label" to label,
+                "stationId" to stationId,
+                "maxUses" to maxUses,
+                "ttlHours" to ttlHours
+            )
+        )
+
+    suspend fun revokeAdminInvite(token: String, inviteId: String): ApiSimpleStatusDto =
+        request("/admin/invites/$inviteId/revoke", method = "POST", token = token)
+
+    suspend fun getAdminAccessLogs(token: String): ApiAccessLogsResponseDto =
+        request("/admin/access-logs", token = token)
+
+    suspend fun clearAuthThrottle(token: String, throttleKey: String?): ApiSimpleStatusDto =
+        request(
+            "/admin/throttles/clear",
+            method = "POST",
+            token = token,
+            body = if (throttleKey.isNullOrBlank()) emptyMap() else mapOf("throttleKey" to throttleKey)
+        )
+
+    suspend fun toggleAdminStation(token: String, stationId: String): ApiSimpleStatusDto =
+        request("/admin/stations/$stationId/toggle", method = "POST", token = token)
 }

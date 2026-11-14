@@ -12,6 +12,11 @@ val localProps = Properties().apply {
     }
 }
 val openAiApiKey: String = localProps.getProperty("OPENAI_API_KEY", "").trim()
+val apiBaseUrl: String = localProps.getProperty("FLYSTIC_API_BASE_URL", "https://api.yoha.io.vn").trim()
+val releaseStoreFile: String = localProps.getProperty("RELEASE_STORE_FILE", "").trim()
+val releaseStorePassword: String = localProps.getProperty("RELEASE_STORE_PASSWORD", "").trim()
+val releaseKeyAlias: String = localProps.getProperty("RELEASE_KEY_ALIAS", "").trim()
+val releaseKeyPassword: String = localProps.getProperty("RELEASE_KEY_PASSWORD", "").trim()
 
 android {
     namespace = "com.verifour.app"
@@ -26,11 +31,24 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "OPENAI_API_KEY", "\"$openAiApiKey\"")
+        buildConfigField("String", "FLYSTIC_API_BASE_URL", "\"$apiBaseUrl\"")
+    }
+
+    signingConfigs {
+        if (releaseStoreFile.isNotEmpty() && file(releaseStoreFile).exists()) {
+            create("release") {
+                storeFile = file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

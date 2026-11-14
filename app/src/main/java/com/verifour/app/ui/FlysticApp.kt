@@ -1,7 +1,9 @@
 package com.verifour.app.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.AddCircleOutline
+import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.Assessment
 import androidx.compose.material.icons.rounded.CardGiftcard
 import androidx.compose.material.icons.rounded.Dashboard
@@ -50,6 +53,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -60,12 +65,14 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.verifour.app.R
 import com.verifour.app.i18n.FlysticTranslations
 import com.verifour.app.model.AppLocale
 import com.verifour.app.model.Role
 import com.verifour.app.ui.components.PlasticPatternBackdrop
 import com.verifour.app.ui.screens.AdminDashboardScreen
 import com.verifour.app.ui.screens.AdminNewTransactionScreen
+import com.verifour.app.ui.screens.AdminOpsScreen
 import com.verifour.app.ui.screens.AdminReportsScreen
 import com.verifour.app.ui.screens.AdminTransactionsScreen
 import com.verifour.app.ui.screens.AuthScreen
@@ -110,6 +117,7 @@ private object FlysticRoutes {
     const val ADMIN_NEW = "admin/new"
     const val ADMIN_TRANSACTIONS = "admin/transactions"
     const val ADMIN_REPORTS = "admin/reports"
+    const val ADMIN_OPS = "admin/ops"
 }
 
 @Composable
@@ -132,16 +140,18 @@ fun FlysticApp(viewModel: FlysticViewModel) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Box(
                     modifier = Modifier
-                        .size(56.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(EcoPrimary),
+                        .size(72.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.White)
+                        .border(1.dp, EcoBorder, RoundedCornerShape(20.dp))
+                        .padding(6.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "F",
-                        fontSize = 26.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color.White
+                    Image(
+                        painter = painterResource(R.drawable.verifour_avatar),
+                        contentDescription = "VeriFour",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
                 Spacer(Modifier.height(16.dp))
@@ -309,8 +319,11 @@ private fun FlysticNavHost(
             AuthScreen(
                 locale = state.locale,
                 isRemote = uiState.isRemote,
+                serverUrl = uiState.serverUrl,
                 onLocaleChange = { viewModel.setLocale(it) },
                 onRemoteModeChange = { viewModel.setRemoteMode(it) },
+                onServerUrlChange = { viewModel.setServerUrl(it) },
+                onTestServerConnection = { url -> viewModel.testServerConnection(url) },
                 onBackHome = {
                     if (!navController.popBackStack()) {
                         navController.navigate(FlysticRoutes.LANDING)
@@ -451,6 +464,7 @@ private fun FlysticNavHost(
         composable(FlysticRoutes.STUDENT_AI_SORT) {
             PlasticAiSortScreen(
                 locale = state.locale,
+                serverUrl = uiState.serverUrl,
                 onBack = { navController.popBackStack() },
                 contentPadding = contentPadding
             )
@@ -537,8 +551,10 @@ private fun FlysticNavHost(
             AdminDashboardScreen(
                 state = state,
                 isRemote = uiState.isRemote,
+                adminOps = uiState.adminOps,
                 onOpenNewTransaction = { navigateTab(navController, FlysticRoutes.ADMIN_NEW) },
                 onOpenTransactions = { navigateTab(navController, FlysticRoutes.ADMIN_TRANSACTIONS) },
+                onOpenAdminOps = { navigateTab(navController, FlysticRoutes.ADMIN_OPS) },
                 onEmptyCollectionPoint = { stationName ->
                     viewModel.emptyCollectionPoint(stationName)
                 },
@@ -569,6 +585,35 @@ private fun FlysticNavHost(
         composable(FlysticRoutes.ADMIN_REPORTS) {
             AdminReportsScreen(
                 state = state,
+                contentPadding = contentPadding
+            )
+        }
+
+        composable(FlysticRoutes.ADMIN_OPS) {
+            AdminOpsScreen(
+                state = state,
+                adminOps = uiState.adminOps,
+                isLoading = uiState.isAdminOpsLoading,
+                onRefresh = { viewModel.refreshAdminOps() },
+                onToggleStation = { stationId -> viewModel.toggleStationOperational(stationId) },
+                onEmptyCollectionPoint = { stationName -> viewModel.emptyCollectionPoint(stationName) },
+                onCreateAccount = { name, email, password, role, studentId, faculty, stationId ->
+                    viewModel.createManagedAccount(name, email, password, role, studentId, faculty, stationId)
+                },
+                onUpdateAccountStatus = { userId, status ->
+                    viewModel.updateAccountStatus(userId, status)
+                },
+                onUpdateAccountRole = { userId, role, stationId ->
+                    viewModel.updateAccountRole(userId, role, stationId)
+                },
+                onRevokeUserTokens = { userId -> viewModel.revokeUserTokens(userId) },
+                onRevokeQrToken = { txId -> viewModel.revokeQrToken(txId) },
+                onExpireStaleQrTokens = { viewModel.expireStaleQrTokens() },
+                onCreateInviteToken = { label, stationId, maxUses, ttlHours ->
+                    viewModel.createAdminInviteToken(label, stationId, maxUses, ttlHours)
+                },
+                onRevokeInviteToken = { inviteId -> viewModel.revokeAdminInviteToken(inviteId) },
+                onClearAuthLockout = { throttleKey -> viewModel.clearAuthLockout(throttleKey) },
                 contentPadding = contentPadding
             )
         }
@@ -701,16 +746,18 @@ private fun AdminTopBar(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(36.dp)
                             .clip(RoundedCornerShape(10.dp))
-                            .background(EcoPrimary),
+                            .background(Color.White)
+                            .border(1.dp, EcoBorder, RoundedCornerShape(10.dp))
+                            .padding(3.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = "F",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
+                        Image(
+                            painter = painterResource(R.drawable.verifour_avatar),
+                            contentDescription = "VeriFour",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
                         )
                     }
                     Spacer(Modifier.width(10.dp))
@@ -748,7 +795,8 @@ private fun AdminBottomBar(
         NavTabItem(FlysticRoutes.ADMIN_DASHBOARD, t("routeDashboard"), Icons.Rounded.Dashboard),
         NavTabItem(FlysticRoutes.ADMIN_NEW, t("routeNewTransaction"), Icons.Rounded.AddCircleOutline),
         NavTabItem(FlysticRoutes.ADMIN_TRANSACTIONS, t("routeTransactions"), Icons.AutoMirrored.Rounded.ReceiptLong),
-        NavTabItem(FlysticRoutes.ADMIN_REPORTS, t("routeReports"), Icons.Rounded.Assessment)
+        NavTabItem(FlysticRoutes.ADMIN_REPORTS, t("routeReports"), Icons.Rounded.Assessment),
+        NavTabItem(FlysticRoutes.ADMIN_OPS, t("routeAdminOps"), Icons.Rounded.AdminPanelSettings)
     )
 
     Surface(

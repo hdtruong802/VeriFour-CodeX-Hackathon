@@ -168,7 +168,7 @@ fun AdminReportsScreen(
             .values
             .map { txs ->
                 TopContributor(
-                    name = txs.firstNotNullOfOrNull { it.userName } ?: "FLYSTIC Student",
+                    name = txs.firstNotNullOfOrNull { it.userName } ?: "VeriFour Student",
                     points = txs.sumOf { it.points },
                     kg = txs.sumOf { it.weightKg }
                 )
@@ -200,7 +200,7 @@ fun AdminReportsScreen(
             }
             val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
             val dateTag = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(now))
-            val fileName = "flystic-${if (showDemo) "demo-jun-jul-2026" else dateTag}.csv"
+            val fileName = "verifour-${if (showDemo) "demo-jun-jul-2026" else dateTag}.csv"
             val csvFile = File(exportDir, fileName)
             csvFile.writeText(csv, Charsets.UTF_8)
 
