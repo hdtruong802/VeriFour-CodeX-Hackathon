@@ -1,15 +1,25 @@
 package com.verifour.app.data
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.net.Uri
 import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.verifour.app.model.AppLocale
 import com.verifour.app.model.COLLECTION_POINTS
+import com.verifour.app.model.CampaignParticipant
+import com.verifour.app.model.CampaignPhoto
 import com.verifour.app.model.Cleanliness
 import com.verifour.app.model.CollectionRun
 import com.verifour.app.model.DemoCampaign
 import com.verifour.app.model.DemoCampaignMetric
+import com.verifour.app.model.EcoCampaign
 import com.verifour.app.model.FlysticState
+import com.verifour.app.model.HabitatTheme
 import com.verifour.app.model.LeaderboardRow
+import com.verifour.app.model.PetCompanionState
+import com.verifour.app.model.PetSkin
+import com.verifour.app.model.PetSpecies
 import com.verifour.app.model.PlasticType
 import com.verifour.app.model.PointDestination
 import com.verifour.app.model.Role
@@ -19,9 +29,12 @@ import com.verifour.app.model.Transaction
 import com.verifour.app.model.TransactionStatus
 import com.verifour.app.model.TxItem
 import com.verifour.app.model.User
+import com.verifour.app.model.UserPersonalizationState
 import com.verifour.app.model.calculatePoints
 import com.verifour.app.model.getStationFillKg
 import com.verifour.app.model.round2
+import java.io.File
+import java.io.FileOutputStream
 import java.security.SecureRandom
 import java.util.UUID
 import kotlin.math.max
@@ -34,10 +47,14 @@ class FlysticRepository(context: Context) {
         private const val KEY_SESSION = "yoha:session:v1"
         private const val KEY_LOCALE = "yoha:locale:v1"
         private const val KEY_IS_REMOTE = "yoha:remote:v1"
+        private const val KEY_PET_PREFIX = "yoha:pet:v1:"
+        private const val KEY_PERSONALIZATION_PREFIX = "yoha:personalization:v1:"
+        private const val KEY_CAMPAIGNS_PREFIX = "yoha:campaigns:v1:"
         private const val TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     }
 
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val gson = Gson()
     private val api = FlysticApiClient()
     private val secureRandom = SecureRandom()
@@ -62,6 +79,144 @@ class FlysticRepository(context: Context) {
             if (token != null) putString(KEY_SESSION, token) else remove(KEY_SESSION)
         }.apply()
     }
+
+    fun loadPetState(userId: String?): PetCompanionState {
+        if (userId.isNullOrBlank()) return PetCompanionState()
+        val raw = prefs.getString("$KEY_PET_PREFIX$userId", null) ?: return PetCompanionState()
+        return runCatching {
+            gson.fromJson(raw, PetCompanionState::class.java) ?: PetCompanionState()
+        }.getOrElse { PetCompanionState() }
+    }
+
+    fun savePetState(userId: String?, petState: PetCompanionState) {
+        if (userId.isNullOrBlank()) return
+        prefs.edit().putString("$KEY_PET_PREFIX$userId", gson.toJson(petState)).apply()
+    }
+
+    fun loadPersonalization(userId: String?): UserPersonalizationState {
+        if (userId.isNullOrBlank()) return UserPersonalizationState()
+        val raw = prefs.getString("$KEY_PERSONALIZATION_PREFIX$userId", null)
+            ?: return UserPersonalizationState()
+        return runCatching {
+            gson.fromJson(raw, UserPersonalizationState::class.java) ?: UserPersonalizationState()
+        }.getOrElse { UserPersonalizationState() }
+    }
+
+    fun savePersonalization(userId: String?, personalization: UserPersonalizationState) {
+        if (userId.isNullOrBlank()) return
+        prefs.edit().putString("$KEY_PERSONALIZATION_PREFIX$userId", gson.toJson(personalization)).apply()
+    }
+
+    fun loadCampaigns(userId: String?): List<EcoCampaign> {
+        if (userId.isNullOrBlank()) return emptyList()
+        val raw = prefs.getString("$KEY_CAMPAIGNS_PREFIX$userId", null) ?: return emptyList()
+        val type = object : TypeToken<List<EcoCampaign>>() {}.type
+        return runCatching {
+            gson.fromJson<List<EcoCampaign>>(raw, type) ?: emptyList()
+        }.getOrElse { emptyList() }
+    }
+
+    fun saveCampaigns(userId: String?, campaigns: List<EcoCampaign>) {
+        if (userId.isNullOrBlank()) return
+        prefs.edit().putString("$KEY_CAMPAIGNS_PREFIX$userId", gson.toJson(campaigns)).apply()
+    }
+
+    fun buildPresetJoinableCampaign(rawCodeOrLink: String): EcoCampaign? {
+        val code = rawCodeOrLink.trim()
+            .substringAfterLast("/")
+            .uppercase()
+        if (code.isBlank()) return null
+        val presets = mapOf(
+            "ECO-HUST" to Triple(
+                "Chiến Dịch Chai Sạch Bách Khoa",
+                "Tuần lễ gom chai PET & cốc PP sạch tại B1 - C7.",
+                HabitatTheme.MEADOW
+            ),
+            "GREEN-BK" to Triple(
+                "Tuần Lễ Thành Phố Xanh K68",
+                "Kết nối mascot các khoa cùng phân loại nhựa & trồng cây.",
+                HabitatTheme.SAKURA_GARDEN
+            )
+        )
+        val matched = presets[code] ?: return null
+        val now = System.currentTimeMillis()
+        return EcoCampaign(
+            id = "preset-${code.lowercase()}",
+            title = matched.first,
+            description = matched.second,
+            inviteCode = code,
+            inviteLink = "https://flystic.app/campaign/$code",
+            targetKg = 12.0,
+            creatorId = "bot-linh",
+            habitatTheme = matched.third,
+            createdAt = now - 86_400_000L,
+            participants = listOf(
+                CampaignParticipant(
+                    userId = "bot-linh",
+                    name = "Nguyễn Thảo Linh",
+                    mascotName = "Mầm B1",
+                    species = PetSpecies.SPROUTLING,
+                    skin = PetSkin.SAKURA,
+                    kgRecycled = 2.6,
+                    points = 64,
+                    equippedTitleId = "clean_saint"
+                ),
+                CampaignParticipant(
+                    userId = "bot-minh",
+                    name = "Trần Quang Minh",
+                    mascotName = "PET-Chan",
+                    species = PetSpecies.TURTLE,
+                    skin = PetSkin.SOLAR_TECH,
+                    plasticMascot = PlasticType.PET,
+                    kgRecycled = 1.9,
+                    points = 46,
+                    equippedTitleId = "pet_king"
+                )
+            ),
+            photos = listOf(
+                CampaignPhoto(
+                    id = "photo-preset-1",
+                    authorUserId = "bot-linh",
+                    authorName = "Nguyễn Thảo Linh",
+                    caption = "Rửa sạch 18 chai PET trước khi bỏ thùng B1!",
+                    plasticType = PlasticType.PET,
+                    kg = 1.4,
+                    samplePhotoKey = "pet",
+                    createdAt = now - 36_000_000L
+                ),
+                CampaignPhoto(
+                    id = "photo-preset-2",
+                    authorUserId = "bot-minh",
+                    authorName = "Trần Quang Minh",
+                    caption = "Gom cốc trà sữa PP tại căng tin Bách Khoa",
+                    plasticType = PlasticType.PP,
+                    kg = 1.1,
+                    samplePhotoKey = "pp",
+                    createdAt = now - 18_000_000L
+                )
+            )
+        )
+    }
+
+    fun saveCampaignBitmap(bitmap: Bitmap): String? = runCatching {
+        val dir = File(appContext.filesDir, "campaign_photos").apply { mkdirs() }
+        val file = File(dir, "eco_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.jpg")
+        FileOutputStream(file).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+        }
+        file.absolutePath
+    }.getOrNull()
+
+    fun copyImageUriToCampaignStorage(uri: Uri): String? = runCatching {
+        val dir = File(appContext.filesDir, "campaign_photos").apply { mkdirs() }
+        val file = File(dir, "eco_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.jpg")
+        appContext.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(file).use { output ->
+                input.copyTo(output)
+            }
+        } ?: return null
+        file.absolutePath
+    }.getOrNull()
 
     fun loadLocalState(): FlysticState {
         val raw = prefs.getString(KEY_STATE, null) ?: return FlysticState(locale = getPersistedLocale())
