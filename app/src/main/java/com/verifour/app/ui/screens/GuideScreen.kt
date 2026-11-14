@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,6 +26,10 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,8 +46,10 @@ import com.verifour.app.R
 import com.verifour.app.i18n.FlysticTranslations
 import com.verifour.app.model.AppLocale
 import com.verifour.app.model.Cleanliness
+import com.verifour.app.model.PLASTIC_MASCOTS
 import com.verifour.app.model.PlasticType
 import com.verifour.app.ui.components.EcoCard
+import com.verifour.app.ui.components.PixelPlasticMascotSprite
 import com.verifour.app.ui.theme.EcoBorder
 import com.verifour.app.ui.theme.EcoCoral
 import com.verifour.app.ui.theme.EcoForeground
@@ -72,6 +79,7 @@ private data class PlasticGuideItem(
 @Composable
 fun GuideScreen(
     locale: AppLocale,
+    onOpenAiSort: (() -> Unit)? = null,
     onBack: () -> Unit,
     contentPadding: PaddingValues = PaddingValues(0.dp)
 ) {
@@ -110,9 +118,46 @@ fun GuideScreen(
                 fontSize = 14.sp,
                 color = EcoMutedForeground
             )
+            if (onOpenAiSort != null) {
+                Spacer(Modifier.height(10.dp))
+                EcoCard(
+                    containerColor = EcoOcean.copy(alpha = 0.12f),
+                    borderColor = EcoOcean.copy(alpha = 0.4f),
+                    onClick = onOpenAiSort,
+                    contentPadding = 12.dp
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("🤖", fontSize = 24.sp)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = t("aiDetectNavBtn"),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EcoForeground
+                            )
+                            Text(
+                                text = t("aiDetectGuideBanner"),
+                                fontSize = 12.sp,
+                                color = EcoMutedForeground
+                            )
+                        }
+                        Text("→", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = EcoOcean)
+                    }
+                }
+            }
         }
 
         items(guides, key = { it.code }) { g ->
+            val plasticType = remember(g.code) {
+                runCatching { PlasticType.valueOf(g.code) }.getOrNull()
+            }
+            val mascotMeta = plasticType?.let { PLASTIC_MASCOTS[it] }
+            var bubbleMode by remember(g.code) { mutableIntStateOf(0) }
+
             EcoCard(
                 containerColor = g.containerColor,
                 borderColor = g.borderColor,
@@ -127,7 +172,29 @@ fun GuideScreen(
                         modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(g.emoji, fontSize = 28.sp)
+                        if (plasticType != null && mascotMeta != null) {
+                            Box(
+                                modifier = Modifier
+                                    .size(62.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(Color.White.copy(alpha = 0.88f))
+                                    .border(
+                                        1.dp,
+                                        Color(mascotMeta.primaryHex).copy(alpha = 0.35f),
+                                        RoundedCornerShape(16.dp)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                PixelPlasticMascotSprite(
+                                    plasticType = plasticType,
+                                    spriteSize = 54.dp,
+                                    happyOverride = bubbleMode == 1,
+                                    onTap = { bubbleMode = if (bubbleMode == 1) 0 else 1 }
+                                )
+                            }
+                        } else {
+                            Text(g.emoji, fontSize = 28.sp)
+                        }
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(
@@ -172,6 +239,43 @@ fun GuideScreen(
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = EcoCoral
+                            )
+                        }
+                    }
+                }
+
+                if (mascotMeta != null) {
+                    Spacer(Modifier.height(10.dp))
+                    val bubbleKey = if (bubbleMode == 1) mascotMeta.cheerKey else mascotMeta.introKey
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color.White.copy(alpha = 0.92f))
+                            .border(
+                                1.dp,
+                                Color(mascotMeta.primaryHex).copy(alpha = 0.3f),
+                                RoundedCornerShape(14.dp)
+                            )
+                            .clickable { bubbleMode = if (bubbleMode == 1) 0 else 1 }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "💬 ${t(mascotMeta.nameKey)}:",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(mascotMeta.primaryHex)
+                            )
+                            Text(
+                                text = t(bubbleKey),
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp,
+                                color = EcoForeground,
+                                modifier = Modifier.weight(1f)
                             )
                         }
                     }

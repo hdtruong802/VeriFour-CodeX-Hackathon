@@ -41,7 +41,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,10 +69,13 @@ import com.verifour.app.ui.screens.AdminNewTransactionScreen
 import com.verifour.app.ui.screens.AdminReportsScreen
 import com.verifour.app.ui.screens.AdminTransactionsScreen
 import com.verifour.app.ui.screens.AuthScreen
+import com.verifour.app.ui.screens.CampaignScreen
 import com.verifour.app.ui.screens.GuideScreen
 import com.verifour.app.ui.screens.LandingScreen
 import com.verifour.app.ui.screens.LeaderboardScreen
 import com.verifour.app.ui.screens.MapScreen
+import com.verifour.app.ui.screens.PetBattleScreen
+import com.verifour.app.ui.screens.PlasticAiSortScreen
 import com.verifour.app.ui.screens.ProfileScreen
 import com.verifour.app.ui.screens.RewardsScreen
 import com.verifour.app.ui.screens.ScanScreen
@@ -97,6 +102,9 @@ private object FlysticRoutes {
     const val STUDENT_PROFILE = "student/profile"
     const val STUDENT_GUIDE = "student/guide"
     const val STUDENT_LEADERBOARD = "student/leaderboard"
+    const val STUDENT_BATTLE = "student/battle"
+    const val STUDENT_CAMPAIGNS = "student/campaigns"
+    const val STUDENT_AI_SORT = "student/ai-sort"
 
     const val ADMIN_DASHBOARD = "admin/dashboard"
     const val ADMIN_NEW = "admin/new"
@@ -264,6 +272,7 @@ private fun FlysticNavHost(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val state = uiState.state
+    var pendingBattleOpponentId by remember { mutableStateOf<String?>(null) }
 
     NavHost(
         navController = navController,
@@ -340,9 +349,37 @@ private fun FlysticNavHost(
         composable(FlysticRoutes.STUDENT_HOME) {
             StudentHomeScreen(
                 state = state,
+                petState = uiState.petState,
+                personalization = uiState.personalization,
+                petReactionKey = uiState.petReactionKey,
+                petEvent = uiState.petEvent,
+                petEventTrigger = uiState.petEventTrigger,
+                petEventPointsDelta = uiState.petEventPointsDelta,
+                petEventNewLevel = uiState.petEventNewLevel,
+                onPatPet = { viewModel.patPet() },
+                onFeedPet = { viewModel.feedPet() },
+                onUpgradePet = { viewModel.upgradePet() },
+                onDemoAddPoints = { viewModel.feedPet(25) },
+                onDemoUpgradePet = { viewModel.demoGrantAndUpgradePet() },
+                onSelectPetSpecies = { viewModel.selectPetSpecies(it) },
+                onSelectSkin = { viewModel.unlockOrEquipSkin(it) },
+                onWaterTree = { viewModel.waterEcoTree() },
+                onUpgradeBuilding = { viewModel.upgradeCityBuilding(it) },
+                onGrantDemoResources = { viewModel.grantDemoEcoResources() },
+                onSavePersonalization = { nick, personality, persona, plastic, theme ->
+                    viewModel.updatePersonalization(nick, personality, persona, plastic, theme)
+                },
                 onOpenScan = { navigateTab(navController, FlysticRoutes.STUDENT_SCAN) },
+                onOpenAiSort = { navController.navigate(FlysticRoutes.STUDENT_AI_SORT) },
                 onOpenGuide = { navController.navigate(FlysticRoutes.STUDENT_GUIDE) },
                 onOpenLeaderboard = { navController.navigate(FlysticRoutes.STUDENT_LEADERBOARD) },
+                onOpenBattle = {
+                    pendingBattleOpponentId = null
+                    navController.navigate(FlysticRoutes.STUDENT_BATTLE)
+                },
+                onOpenCampaigns = {
+                    navController.navigate(FlysticRoutes.STUDENT_CAMPAIGNS)
+                },
                 contentPadding = contentPadding
             )
         }
@@ -361,6 +398,12 @@ private fun FlysticNavHost(
             ScanScreen(
                 state = state,
                 isRemote = uiState.isRemote,
+                petState = uiState.petState,
+                personalization = uiState.personalization,
+                petEvent = uiState.petEvent,
+                petEventTrigger = uiState.petEventTrigger,
+                petEventNewLevel = uiState.petEventNewLevel,
+                onUpgradePet = { viewModel.upgradePet() },
                 onGetTransaction = { token -> viewModel.getTransaction(token) },
                 onConfirmTransaction = { token, destination, preview ->
                     viewModel.confirmTransaction(token, destination, preview)
@@ -381,6 +424,10 @@ private fun FlysticNavHost(
             ProfileScreen(
                 state = state,
                 isRemote = uiState.isRemote,
+                petState = uiState.petState,
+                personalization = uiState.personalization,
+                campaigns = uiState.campaigns,
+                onEquipTitle = { viewModel.equipTitle(it) },
                 onLocaleChange = { viewModel.setLocale(it) },
                 onSignOut = {
                     viewModel.signOut()
@@ -395,6 +442,15 @@ private fun FlysticNavHost(
         composable(FlysticRoutes.STUDENT_GUIDE) {
             GuideScreen(
                 locale = state.locale,
+                onOpenAiSort = { navController.navigate(FlysticRoutes.STUDENT_AI_SORT) },
+                onBack = { navController.popBackStack() },
+                contentPadding = contentPadding
+            )
+        }
+
+        composable(FlysticRoutes.STUDENT_AI_SORT) {
+            PlasticAiSortScreen(
+                locale = state.locale,
                 onBack = { navController.popBackStack() },
                 contentPadding = contentPadding
             )
@@ -404,7 +460,72 @@ private fun FlysticNavHost(
             LeaderboardScreen(
                 state = state,
                 isRemote = uiState.isRemote,
+                petState = uiState.petState,
+                personalization = uiState.personalization,
                 onFetchLeaderboard = { period -> viewModel.getLeaderboard(period) },
+                onOpenBattle = { opponentId ->
+                    pendingBattleOpponentId = opponentId
+                    navController.navigate(FlysticRoutes.STUDENT_BATTLE)
+                },
+                onOpenCampaigns = {
+                    navController.navigate(FlysticRoutes.STUDENT_CAMPAIGNS)
+                },
+                onBack = { navController.popBackStack() },
+                contentPadding = contentPadding
+            )
+        }
+
+        composable(FlysticRoutes.STUDENT_BATTLE) {
+            PetBattleScreen(
+                state = state,
+                petState = uiState.petState,
+                personalization = uiState.personalization,
+                initialOpponentId = pendingBattleOpponentId,
+                onBattleFinished = { won, rpDelta, seedsEarned, xpEarned, weeklyPtsEarned, weeklyKgEarned ->
+                    viewModel.recordBattleResult(
+                        won = won,
+                        rpDelta = rpDelta,
+                        seedsEarned = seedsEarned,
+                        xpEarned = xpEarned,
+                        weeklyPtsEarned = weeklyPtsEarned,
+                        weeklyKgEarned = weeklyKgEarned
+                    )
+                },
+                onOpenLeaderboard = {
+                    navController.navigate(FlysticRoutes.STUDENT_LEADERBOARD) {
+                        popUpTo(FlysticRoutes.STUDENT_BATTLE) { inclusive = true }
+                    }
+                },
+                onBack = { navController.popBackStack() },
+                contentPadding = contentPadding
+            )
+        }
+
+        composable(FlysticRoutes.STUDENT_CAMPAIGNS) {
+            CampaignScreen(
+                state = state,
+                petState = uiState.petState,
+                personalization = uiState.personalization,
+                campaigns = uiState.campaigns,
+                onOpenCampaign = { title, desc, targetKg ->
+                    viewModel.openCampaign(title, desc, targetKg)
+                },
+                onJoinCampaign = { codeOrLink ->
+                    viewModel.joinCampaignByCodeOrLink(codeOrLink)
+                },
+                onInviteMascot = { cmpId, friendName, mascotName, species, skin, plastic ->
+                    viewModel.inviteMascotToCampaign(cmpId, friendName, mascotName, species, skin, plastic)
+                },
+                onAddPhoto = { cmpId, caption, plastic, kg, localPath, sampleKey ->
+                    viewModel.addCampaignPhoto(cmpId, caption, plastic, kg, localPath, sampleKey)
+                },
+                onSaveBitmap = { bmp -> viewModel.saveCampaignBitmap(bmp) },
+                onSaveUri = { uri -> viewModel.saveCampaignUri(uri) },
+                onConcludeCampaign = { viewModel.concludeCampaign(it) },
+                onReopenCampaign = { viewModel.reopenCampaign(it) },
+                onPopulateDemoCampaign = { cmpId, autoEnd ->
+                    viewModel.populateDemoCampaign(cmpId, autoEnd)
+                },
                 onBack = { navController.popBackStack() },
                 contentPadding = contentPadding
             )
@@ -503,7 +624,11 @@ private fun StudentBottomBar(
             tabs.forEach { tab ->
                 val active = currentRoute == tab.route ||
                     (tab.route == FlysticRoutes.STUDENT_HOME &&
-                        (currentRoute == FlysticRoutes.STUDENT_GUIDE || currentRoute == FlysticRoutes.STUDENT_LEADERBOARD))
+                        (currentRoute == FlysticRoutes.STUDENT_GUIDE ||
+                            currentRoute == FlysticRoutes.STUDENT_LEADERBOARD ||
+                            currentRoute == FlysticRoutes.STUDENT_BATTLE ||
+                            currentRoute == FlysticRoutes.STUDENT_CAMPAIGNS ||
+                            currentRoute == FlysticRoutes.STUDENT_AI_SORT))
 
                 if (tab.isPrimaryCenter) {
                     Box(

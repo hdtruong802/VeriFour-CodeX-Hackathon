@@ -7,7 +7,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -34,10 +33,22 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.verifour.app.i18n.FlysticTranslations
+import com.verifour.app.model.CityBuildingType
+import com.verifour.app.model.EcoPersona
 import com.verifour.app.model.FlysticState
+import com.verifour.app.model.HabitatTheme
+import com.verifour.app.model.PetAnimationEvent
+import com.verifour.app.model.PetCompanionState
+import com.verifour.app.model.PetPersonality
+import com.verifour.app.model.PetSkin
+import com.verifour.app.model.PetSpecies
+import com.verifour.app.model.PlasticType
 import com.verifour.app.model.TransactionStatus
+import com.verifour.app.model.UserPersonalizationState
 import com.verifour.app.model.effectiveTransactionStatus
 import com.verifour.app.ui.components.EcoCard
+import com.verifour.app.ui.components.PixelGreenCityCard
+import com.verifour.app.ui.components.PixelPetHomeCard
 import com.verifour.app.ui.theme.EcoBackground
 import com.verifour.app.ui.theme.EcoBorder
 import com.verifour.app.ui.theme.EcoForeground
@@ -50,13 +61,39 @@ import com.verifour.app.ui.theme.EcoSecondary
 import com.verifour.app.ui.theme.EcoSunshine
 import java.util.Locale
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun StudentHomeScreen(
     state: FlysticState,
+    petState: PetCompanionState,
+    personalization: UserPersonalizationState,
+    petReactionKey: String?,
+    petEvent: PetAnimationEvent,
+    petEventTrigger: Int,
+    petEventPointsDelta: Int,
+    petEventNewLevel: Int,
+    onPatPet: () -> Unit,
+    onFeedPet: () -> Unit,
+    onUpgradePet: () -> Unit,
+    onDemoAddPoints: () -> Unit,
+    onDemoUpgradePet: () -> Unit,
+    onSelectPetSpecies: (PetSpecies) -> Unit,
+    onSelectSkin: (PetSkin) -> Unit,
+    onWaterTree: () -> Unit,
+    onUpgradeBuilding: (CityBuildingType) -> Unit,
+    onGrantDemoResources: () -> Unit,
+    onSavePersonalization: (
+        petNickname: String,
+        personality: PetPersonality,
+        ecoPersona: EcoPersona,
+        favoritePlastic: PlasticType,
+        habitatTheme: HabitatTheme
+    ) -> Unit,
     onOpenScan: () -> Unit,
+    onOpenAiSort: () -> Unit,
     onOpenGuide: () -> Unit,
     onOpenLeaderboard: () -> Unit,
+    onOpenBattle: () -> Unit,
+    onOpenCampaigns: () -> Unit,
     contentPadding: PaddingValues = PaddingValues(0.dp)
 ) {
     val user = state.user ?: return
@@ -80,18 +117,73 @@ fun StudentHomeScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
-            Column {
+            val persona = personalization.resolvedPersona()
+            val favPlastic = personalization.resolvedFavoritePlastic()
+            val tier = personalization.resolvedTier()
+            val equippedTitle = personalization.resolvedEquippedTitle()
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = t("studentGreeting"),
                     fontSize = 14.sp,
                     color = EcoMutedForeground
                 )
-                Text(
-                    text = "${user.name} 👋",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = EcoForeground
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "${user.name} 👋",
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = EcoForeground
+                    )
+                    if (equippedTitle != null) {
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(EcoPrimary.copy(alpha = 0.14f))
+                                .border(1.dp, EcoPrimary.copy(alpha = 0.35f), CircleShape)
+                                .padding(horizontal = 9.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = "${equippedTitle.emoji} ${t(equippedTitle.nameKey)}",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = EcoPrimary
+                            )
+                        }
+                    }
+                }
+                EcoCard(
+                    containerColor = EcoPrimary.copy(alpha = 0.08f),
+                    borderColor = EcoPrimary.copy(alpha = 0.25f),
+                    contentPadding = 10.dp
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${persona.emoji} ${t(persona.nameKey)}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = EcoPrimary
+                            )
+                            Text(
+                                text = "· ${favPlastic.emoji} ${favPlastic.code} · ${tier.emoji} ${personalization.arenaRp} RP",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = EcoMutedForeground
+                            )
+                        }
+                        Text(
+                            text = t(persona.missionKey),
+                            fontSize = 11.sp,
+                            color = EcoForeground
+                        )
+                    }
+                }
             }
         }
 
@@ -219,39 +311,110 @@ fun StudentHomeScreen(
             }
         }
 
-        // 3 Quick Actions
+        // Pixel Eco Pet Companion
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                QuickActionTile(
-                    emoji = "🔳",
-                    label = t("studentScanQr"),
-                    bg = EcoPrimary,
-                    fg = Color.White,
-                    border = EcoPrimary,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenScan
-                )
-                QuickActionTile(
-                    emoji = "📚",
-                    label = t("studentGuideSorting"),
-                    bg = Color.White,
-                    fg = EcoForeground,
-                    border = EcoBorder,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenGuide
-                )
-                QuickActionTile(
-                    emoji = "🏆",
-                    label = t("studentLeaderboard"),
-                    bg = EcoSunshine.copy(alpha = 0.35f),
-                    fg = EcoForeground,
-                    border = EcoSunshine,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenLeaderboard
-                )
+            PixelPetHomeCard(
+                locale = locale,
+                studentPoints = state.points,
+                petState = petState,
+                personalization = personalization,
+                petReactionKey = petReactionKey,
+                petEvent = petEvent,
+                petEventTrigger = petEventTrigger,
+                petEventPointsDelta = petEventPointsDelta,
+                petEventNewLevel = petEventNewLevel,
+                onPatPet = onPatPet,
+                onFeedPet = onFeedPet,
+                onUpgradePet = onUpgradePet,
+                onDemoAddPoints = onDemoAddPoints,
+                onDemoUpgradePet = onDemoUpgradePet,
+                onSelectSpecies = onSelectPetSpecies,
+                onSelectSkin = onSelectSkin
+            )
+        }
+
+        // Green City, Trees & Personalization
+        item {
+            PixelGreenCityCard(
+                locale = locale,
+                userName = user.name,
+                petState = petState,
+                personalization = personalization,
+                onWaterTree = onWaterTree,
+                onUpgradeBuilding = onUpgradeBuilding,
+                onGrantDemoResources = onGrantDemoResources,
+                onSavePersonalization = onSavePersonalization,
+                onOpenCampaigns = onOpenCampaigns
+            )
+        }
+
+        // Quick Actions (Scan + AI Sort + Weekly Battle + Campaigns + Guide + Leaderboard)
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    QuickActionTile(
+                        emoji = "🔳",
+                        label = t("studentScanQr"),
+                        bg = EcoPrimary,
+                        fg = Color.White,
+                        border = EcoPrimary,
+                        modifier = Modifier.weight(1f),
+                        onClick = onOpenScan
+                    )
+                    QuickActionTile(
+                        emoji = "🤖",
+                        label = t("aiDetectNavBtn"),
+                        bg = EcoOcean.copy(alpha = 0.14f),
+                        fg = EcoForeground,
+                        border = EcoOcean.copy(alpha = 0.45f),
+                        modifier = Modifier.weight(1f),
+                        onClick = onOpenAiSort
+                    )
+                    QuickActionTile(
+                        emoji = "⚔️",
+                        label = t("battleButton"),
+                        bg = EcoForeground,
+                        fg = EcoPrimaryGlow,
+                        border = EcoForeground,
+                        modifier = Modifier.weight(1f),
+                        onClick = onOpenBattle
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    QuickActionTile(
+                        emoji = "📣",
+                        label = t("campaignNavBtn"),
+                        bg = EcoLeaf.copy(alpha = 0.22f),
+                        fg = EcoForeground,
+                        border = EcoPrimary.copy(alpha = 0.35f),
+                        modifier = Modifier.weight(1f),
+                        onClick = onOpenCampaigns
+                    )
+                    QuickActionTile(
+                        emoji = "📚",
+                        label = t("studentGuideSorting"),
+                        bg = Color.White,
+                        fg = EcoForeground,
+                        border = EcoBorder,
+                        modifier = Modifier.weight(1f),
+                        onClick = onOpenGuide
+                    )
+                    QuickActionTile(
+                        emoji = "🏆",
+                        label = t("studentLeaderboard"),
+                        bg = EcoSunshine.copy(alpha = 0.35f),
+                        fg = EcoForeground,
+                        border = EcoSunshine,
+                        modifier = Modifier.weight(1f),
+                        onClick = onOpenLeaderboard
+                    )
+                }
             }
         }
 
