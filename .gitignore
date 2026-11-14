@@ -1,3 +1,4 @@
+# Web / Node
 node_modules/
 .wrangler/
 .DS_Store
@@ -5,3 +6,23 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Android / Gradle
+*.iml
+.gradle/
+local.properties
+.idea/
+/build/
+/app/build/
+*/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+*.jks
+*.keystore
+!gradle/wrapper/gradle-wrapper.jar
