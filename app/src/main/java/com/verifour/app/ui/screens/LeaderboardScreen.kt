@@ -19,6 +19,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -36,18 +40,25 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.verifour.app.i18n.FlysticTranslations
+import com.verifour.app.model.ArenaTier
 import com.verifour.app.model.FlysticState
 import com.verifour.app.model.LeaderboardRow
+import com.verifour.app.model.PetCompanionState
+import com.verifour.app.model.PetProgression
+import com.verifour.app.model.PetStage
 import com.verifour.app.model.TransactionStatus
+import com.verifour.app.model.UserPersonalizationState
 import com.verifour.app.model.effectiveTransactionStatus
 import com.verifour.app.model.round2
 import com.verifour.app.ui.components.EcoCard
+import com.verifour.app.ui.components.PixelPetSprite
 import com.verifour.app.ui.theme.EcoBorder
 import com.verifour.app.ui.theme.EcoCoral
 import com.verifour.app.ui.theme.EcoForeground
 import com.verifour.app.ui.theme.EcoLeaf
 import com.verifour.app.ui.theme.EcoMutedForeground
 import com.verifour.app.ui.theme.EcoPrimary
+import com.verifour.app.ui.theme.EcoPrimaryGlow
 import com.verifour.app.ui.theme.EcoSecondary
 import com.verifour.app.ui.theme.EcoSunshine
 import java.util.Calendar
@@ -56,20 +67,28 @@ import java.util.Locale
 private enum class LeaderboardTab {
     WEEK,
     ALL,
-    FACULTY
+    FACULTY,
+    ARENA
 }
 
 @Composable
 fun LeaderboardScreen(
     state: FlysticState,
     isRemote: Boolean,
+    petState: PetCompanionState,
+    personalization: UserPersonalizationState,
     onFetchLeaderboard: suspend (String) -> List<LeaderboardRow>,
+    onOpenBattle: (String?) -> Unit,
+    onOpenCampaigns: () -> Unit,
     onBack: () -> Unit,
     contentPadding: PaddingValues = PaddingValues(0.dp)
 ) {
     val user = state.user ?: return
     val locale = state.locale
     fun t(key: String) = FlysticTranslations.t(key, locale)
+    val weeklySummary = remember(state, user.id, personalization) {
+        PetProgression.computeWeeklySummary(state, user.id, personalization)
+    }
 
     var tab by remember { mutableStateOf(LeaderboardTab.WEEK) }
     var remoteRows by remember { mutableStateOf(state.leaderboard) }
@@ -130,8 +149,14 @@ fun LeaderboardScreen(
                     userId = user.id,
                     name = user.name,
                     faculty = user.faculty ?: "Khác",
-                    points = if (tab == LeaderboardTab.WEEK) 0 else state.points,
-                    kg = if (tab == LeaderboardTab.WEEK) 0.0 else state.totalKg
+                    points = if (tab == LeaderboardTab.WEEK) weeklySummary.totalWeeklyScore else state.points,
+                    kg = if (tab == LeaderboardTab.WEEK) weeklySummary.weeklyKg else state.totalKg
+                )
+            } else if (tab == LeaderboardTab.WEEK) {
+                val cur = map.getValue(user.id)
+                map[user.id] = cur.copy(
+                    points = cur.points + personalization.weeklyBattleBonusPts,
+                    kg = round2(cur.kg + personalization.weeklyBattleKgBonus)
                 )
             }
             map.values.sortedWith(compareByDescending<LeaderboardRow> { it.points }.thenByDescending { it.kg })
@@ -189,6 +214,8 @@ fun LeaderboardScreen(
         item {
             Row(
                 modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .clip(CircleShape)
                     .background(EcoSecondary)
                     .padding(4.dp),
@@ -197,7 +224,8 @@ fun LeaderboardScreen(
                 listOf(
                     LeaderboardTab.WEEK to t("leaderboardWeek"),
                     LeaderboardTab.ALL to t("leaderboardAll"),
-                    LeaderboardTab.FACULTY to t("leaderboardFaculty")
+                    LeaderboardTab.FACULTY to t("leaderboardFaculty"),
+                    LeaderboardTab.ARENA to t("battleRankTab")
                 ).forEach { (itemTab, label) ->
                     val selected = tab == itemTab
                     Box(
@@ -205,7 +233,7 @@ fun LeaderboardScreen(
                             .clip(CircleShape)
                             .background(if (selected) EcoForeground else Color.Transparent)
                             .clickable { tab = itemTab }
-                            .padding(horizontal = 16.dp, vertical = 7.dp)
+                            .padding(horizontal = 14.dp, vertical = 7.dp)
                     ) {
                         Text(
                             text = label,
@@ -218,7 +246,213 @@ fun LeaderboardScreen(
             }
         }
 
-        if (tab != LeaderboardTab.FACULTY) {
+        // Quick Weekly Battle & Campaigns Banner
+        if (tab != LeaderboardTab.ARENA) {
+            item {
+                val myTier = personalization.resolvedTier()
+                EcoCard(
+                    containerColor = EcoForeground,
+                    contentPadding = 12.dp
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${myTier.emoji} ${t(myTier.nameKey)} · ${personalization.arenaRp} RP",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = EcoPrimaryGlow
+                            )
+                            Text(
+                                text = "${String.format(Locale.US, "%.1f", weeklySummary.weeklyKg)} kg tuần · W:${personalization.arenaWins}/L:${personalization.arenaLosses}",
+                                fontSize = 11.sp,
+                                color = Color.White.copy(alpha = 0.78f)
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Button(
+                                onClick = onOpenCampaigns,
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = EcoSunshine,
+                                    contentColor = EcoForeground
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "📣 ${t("campaignNavBtn")}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Button(
+                                onClick = { onOpenBattle(null) },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = EcoPrimary,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "⚔️ ${t("battleButton")}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (tab == LeaderboardTab.ARENA) {
+            val myTier = personalization.resolvedTier()
+            val myPetName = personalization.petNickname.ifBlank { t(petState.species.nameKey) }
+            val arenaRivals = PetProgression.buildArenaOpponents(rows, user.id)
+            val arenaBoard = (
+                arenaRivals.map { it to false } +
+                    listOf(
+                        com.verifour.app.model.ArenaOpponent(
+                            userId = user.id,
+                            name = user.name,
+                            faculty = user.faculty ?: "HUST",
+                            petName = myPetName,
+                            species = petState.species,
+                            stage = PetStage.fromLevel(petState.level),
+                            skin = personalization.resolvedSkin(),
+                            personality = personalization.resolvedPersonality(petState.species),
+                            level = petState.level,
+                            rp = personalization.arenaRp,
+                            maxHp = 100,
+                            attack = 20,
+                            weeklyKg = weeklySummary.weeklyKg,
+                            weeklyPoints = weeklySummary.totalWeeklyScore,
+                            equippedTitleId = personalization.equippedTitleId
+                        ) to true
+                    )
+                ).sortedByDescending { it.first.rp }
+            val myArenaRank = arenaBoard.indexOfFirst { it.second } + 1
+
+            item {
+                EcoCard(
+                    containerColor = Color(myTier.colorHex).copy(alpha = 0.14f),
+                    borderColor = Color(myTier.colorHex).copy(alpha = 0.45f),
+                    contentPadding = 14.dp
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${t("battleYourRankCard")}: #$myArenaRank",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EcoMutedForeground
+                            )
+                            Text(
+                                text = "${myTier.emoji} ${t(myTier.nameKey)} · ${personalization.arenaRp} RP",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = EcoForeground
+                            )
+                            Text(
+                                text = "W:${personalization.arenaWins} / L:${personalization.arenaLosses} · 🔥 ${personalization.arenaStreak}",
+                                fontSize = 11.sp,
+                                color = EcoMutedForeground
+                            )
+                        }
+                        Button(
+                            onClick = { onOpenBattle(null) },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = EcoPrimary)
+                        ) {
+                            Text(
+                                text = "⚔️ ${t("battleButton")}",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+            }
+
+            itemsIndexed(arenaBoard, key = { _, pair -> pair.first.userId }) { idx, (opp, isMe) ->
+                val tier = ArenaTier.fromRp(opp.rp)
+                val oppTitle = PetProgression.titleById(opp.equippedTitleId)
+                EcoCard(
+                    containerColor = if (isMe) EcoPrimary.copy(alpha = 0.08f) else Color.White,
+                    borderColor = if (isMe) EcoPrimary else EcoBorder,
+                    contentPadding = 12.dp
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "#${idx + 1}",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (idx < 3) EcoPrimary else EcoMutedForeground,
+                            modifier = Modifier.width(26.dp)
+                        )
+                        PixelPetSprite(
+                            species = opp.species,
+                            stage = opp.stage,
+                            skin = opp.skin,
+                            spriteSize = 46.dp
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isMe) "${opp.name} (Bạn)" else opp.name,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EcoForeground,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${tier.emoji} ${opp.rp} RP · ${String.format(Locale.US, "%.1f", opp.weeklyKg)}kg/tuần · Lv.${opp.level}",
+                                fontSize = 11.sp,
+                                color = EcoMutedForeground,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (oppTitle != null) {
+                                Text(
+                                    text = "${oppTitle.emoji} ${t(oppTitle.nameKey)}",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = EcoPrimary
+                                )
+                            }
+                        }
+                        if (!isMe) {
+                            Button(
+                                onClick = { onOpenBattle(opp.userId) },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = EcoForeground),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "⚔️ ${t("battleChallengeBtn")}",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = EcoPrimaryGlow
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (tab != LeaderboardTab.FACULTY) {
             if (top3.isNotEmpty()) {
                 item {
                     Row(

@@ -73,12 +73,17 @@ import com.verifour.app.data.FlysticApiException
 import com.verifour.app.i18n.FlysticTranslations
 import com.verifour.app.model.Cleanliness
 import com.verifour.app.model.FlysticState
+import com.verifour.app.model.PetAnimationEvent
+import com.verifour.app.model.PetCompanionState
+import com.verifour.app.model.PlasticType
 import com.verifour.app.model.PointDestination
 import com.verifour.app.model.Role
 import com.verifour.app.model.Transaction
 import com.verifour.app.model.TransactionStatus
+import com.verifour.app.model.UserPersonalizationState
 import com.verifour.app.model.effectiveTransactionStatus
 import com.verifour.app.ui.components.EcoCard
+import com.verifour.app.ui.components.PixelPetScanCelebration
 import com.verifour.app.ui.theme.EcoBackground
 import com.verifour.app.ui.theme.EcoBorder
 import com.verifour.app.ui.theme.EcoCard
@@ -95,6 +100,12 @@ import java.util.Locale
 fun ScanScreen(
     state: FlysticState,
     isRemote: Boolean,
+    petState: PetCompanionState,
+    personalization: UserPersonalizationState,
+    petEvent: PetAnimationEvent,
+    petEventTrigger: Int,
+    petEventNewLevel: Int,
+    onUpgradePet: () -> Unit,
     onGetTransaction: suspend (String) -> Transaction?,
     onConfirmTransaction: suspend (String, PointDestination, Transaction?) -> Transaction?,
     onBackHome: () -> Unit,
@@ -110,7 +121,7 @@ fun ScanScreen(
     var tokenInput by remember { mutableStateOf("") }
     var previewTx by remember { mutableStateOf<Transaction?>(null) }
     var destination by remember { mutableStateOf<PointDestination?>(null) }
-    var successResult by remember { mutableStateOf<Pair<Int, Double>?>(null) }
+    var successResult by remember { mutableStateOf<Triple<Int, Double, PlasticType?>?>(null) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     var isConfirming by remember { mutableStateOf(false) }
     var isScanning by remember { mutableStateOf(false) }
@@ -212,7 +223,7 @@ fun ScanScreen(
     }
 
     if (successResult != null) {
-        val (pts, weightKg) = successResult!!
+        val (pts, weightKg, mainPlastic) = successResult!!
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -221,8 +232,19 @@ fun ScanScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            Text("♻️", fontSize = 64.sp)
-            Spacer(Modifier.height(16.dp))
+            PixelPetScanCelebration(
+                locale = locale,
+                pointsEarned = pts,
+                studentPoints = state.points,
+                petState = petState,
+                petEvent = petEvent,
+                petEventTrigger = petEventTrigger,
+                petEventNewLevel = petEventNewLevel,
+                onUpgradePet = onUpgradePet,
+                celebratedPlastic = mainPlastic,
+                personalization = personalization
+            )
+            Spacer(Modifier.height(14.dp))
             Text(
                 text = t("scanSuccessTitle"),
                 fontSize = 26.sp,
@@ -668,7 +690,9 @@ fun ScanScreen(
                             try {
                                 val confirmed = onConfirmTransaction(tx.token, dest, tx)
                                 if (confirmed != null) {
-                                    successResult = confirmed.points to confirmed.totalQuantity
+                                    val mainPlastic = confirmed.items.firstOrNull()?.plasticType
+                                        ?: tx.items.firstOrNull()?.plasticType
+                                    successResult = Triple(confirmed.points, confirmed.totalQuantity, mainPlastic)
                                     previewTx = null
                                     destination = null
                                     tokenInput = ""

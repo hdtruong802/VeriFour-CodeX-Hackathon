@@ -53,11 +53,19 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.text.style.TextOverflow
 import com.verifour.app.i18n.FlysticTranslations
 import com.verifour.app.model.AppLocale
-import com.verifour.app.model.Cleanliness
+import com.verifour.app.model.ECO_TITLES
+import com.verifour.app.model.EcoCampaign
 import com.verifour.app.model.FlysticState
+import com.verifour.app.model.PetCompanionState
+import com.verifour.app.model.PetProgression
+import com.verifour.app.model.TitleCategory
 import com.verifour.app.model.TransactionStatus
+import com.verifour.app.model.UserPersonalizationState
 import com.verifour.app.model.effectiveTransactionStatus
 import com.verifour.app.ui.components.EcoCard
 import com.verifour.app.ui.theme.EcoBackground
@@ -82,6 +90,10 @@ private enum class ProfileSheet {
 fun ProfileScreen(
     state: FlysticState,
     isRemote: Boolean,
+    petState: PetCompanionState,
+    personalization: UserPersonalizationState,
+    campaigns: List<EcoCampaign>,
+    onEquipTitle: (String) -> Unit,
     onLocaleChange: (AppLocale) -> Unit,
     onSignOut: () -> Unit,
     contentPadding: PaddingValues = PaddingValues(0.dp)
@@ -92,24 +104,17 @@ fun ProfileScreen(
     fun t(key: String) = FlysticTranslations.t(key, locale)
 
     var activeSheet by remember { mutableStateOf<ProfileSheet?>(null) }
+    var selectedCategory by remember { mutableStateOf<TitleCategory?>(null) }
 
     val myConfirmed = state.transactions.filter {
         it.userId == user.id && effectiveTransactionStatus(it) == TransactionStatus.CONFIRMED
     }
     val bottles = (state.totalKg * 40).roundToInt()
     val itemsKg = myConfirmed.sumOf { tx -> tx.items.sumOf { it.quantity } }
-    val allClean = myConfirmed.isNotEmpty() && myConfirmed.all { tx ->
-        tx.items.all { it.cleanliness == Cleanliness.CLEAN }
+    val unlockedTitleIds = remember(state, petState, personalization, campaigns) {
+        PetProgression.evaluateUnlockedTitles(state, petState, personalization, campaigns)
     }
-
-    val badges = listOf(
-        Triple("🌱", "First Drop", itemsKg > 0),
-        Triple("♻️", "Green Starter", state.totalKg >= 1.0),
-        Triple("🦸", "Plastic Hero", state.totalKg >= 5.0),
-        Triple("✨", "Clean Recycler", allClean),
-        Triple("🔥", "Weekly Warrior", myConfirmed.size >= 3),
-        Triple("🏆", "Campus Guardian", state.totalKg >= 10.0)
-    )
+    val equippedTitle = personalization.resolvedEquippedTitle()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -147,6 +152,29 @@ fun ProfileScreen(
                             fontWeight = FontWeight.Bold,
                             color = EcoForeground
                         )
+                        if (equippedTitle != null) {
+                            Spacer(Modifier.height(4.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(EcoPrimary.copy(alpha = 0.14f))
+                                    .border(1.dp, EcoPrimary.copy(alpha = 0.35f), CircleShape)
+                                    .padding(horizontal = 9.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = "${equippedTitle.emoji} ${t(equippedTitle.nameKey)}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = EcoPrimary
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = t("titleNoneEquipped"),
+                                fontSize = 11.sp,
+                                color = EcoMutedForeground
+                            )
+                        }
                         val meta = listOfNotNull(user.studentId, user.className).joinToString(" · ")
                         if (meta.isNotBlank()) {
                             Text(meta, fontSize = 13.sp, color = EcoMutedForeground)
@@ -192,42 +220,159 @@ fun ProfileScreen(
             }
         }
 
-        // Badges Grid
+        // Multi-Category Eco Titles
         item {
             EcoCard(contentPadding = 18.dp) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "🏅 ${t("titleSectionTitle")}",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = EcoForeground
+                    )
+                    Text(
+                        text = "${unlockedTitleIds.size}/${ECO_TITLES.size}",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = EcoPrimary
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
                 Text(
-                    text = t("profileBadges"),
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = EcoForeground
+                    text = t("titleSectionSubtitle"),
+                    fontSize = 12.sp,
+                    color = EcoMutedForeground
                 )
-                Spacer(Modifier.height(12.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    badges.chunked(3).forEach { rowBadges ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                Spacer(Modifier.height(10.dp))
+
+                // Category Filter Pills
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val allSelected = selectedCategory == null
+                    Surface(
+                        shape = CircleShape,
+                        color = if (allSelected) EcoForeground else EcoSecondary,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable { selectedCategory = null }
+                    ) {
+                        Text(
+                            text = "🌟 ${ECO_TITLES.size}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (allSelected) Color.White else EcoForeground,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+                    TitleCategory.entries.forEach { cat ->
+                        val selected = selectedCategory == cat
+                        Surface(
+                            shape = CircleShape,
+                            color = if (selected) EcoPrimary else EcoSecondary,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable { selectedCategory = cat }
                         ) {
-                            rowBadges.forEach { (emoji, label, earned) ->
-                                Column(
+                            Text(
+                                text = "${cat.emoji} ${t(cat.nameKey)}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (selected) Color.White else EcoForeground,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                val categoriesToShow = selectedCategory?.let { listOf(it) } ?: TitleCategory.entries
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    categoriesToShow.forEach { category ->
+                        val catTitles = ECO_TITLES.filter { it.category == category }
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "${category.emoji} ${t(category.nameKey)}",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = EcoForeground
+                            )
+                            catTitles.forEach { title ->
+                                val unlocked = title.id in unlockedTitleIds
+                                val isEquipped = personalization.equippedTitleId == title.id
+                                Row(
                                     modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(16.dp))
-                                        .background(if (earned) Color.White else EcoSecondary)
-                                        .border(1.dp, EcoBorder, RoundedCornerShape(16.dp))
-                                        .alpha(if (earned) 1f else 0.48f)
-                                        .padding(vertical = 14.dp, horizontal = 6.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(
+                                            when {
+                                                isEquipped -> EcoPrimary.copy(alpha = 0.12f)
+                                                unlocked -> Color.White
+                                                else -> EcoSecondary.copy(alpha = 0.7f)
+                                            }
+                                        )
+                                        .border(
+                                            width = if (isEquipped) 1.5.dp else 1.dp,
+                                            color = if (isEquipped) EcoPrimary else EcoBorder,
+                                            shape = RoundedCornerShape(14.dp)
+                                        )
+                                        .alpha(if (unlocked) 1f else 0.56f)
+                                        .clickable(enabled = unlocked) { onEquipTitle(title.id) }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
-                                    Text(emoji, fontSize = 26.sp)
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        text = label,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = EcoForeground,
-                                        textAlign = TextAlign.Center
-                                    )
+                                    Text(title.emoji, fontSize = 22.sp)
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = t(title.nameKey),
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = EcoForeground
+                                        )
+                                        Text(
+                                            text = t(title.descKey),
+                                            fontSize = 11.sp,
+                                            color = EcoMutedForeground,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(CircleShape)
+                                            .background(
+                                                when {
+                                                    isEquipped -> EcoPrimary
+                                                    unlocked -> EcoPrimary.copy(alpha = 0.12f)
+                                                    else -> EcoBorder
+                                                }
+                                            )
+                                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = when {
+                                                isEquipped -> t("titleEquippedBadge")
+                                                unlocked -> t("titleEquipBtn")
+                                                else -> t("titleLockedBadge")
+                                            },
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = when {
+                                                isEquipped -> Color.White
+                                                unlocked -> EcoPrimary
+                                                else -> EcoMutedForeground
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
